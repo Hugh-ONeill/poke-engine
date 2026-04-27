@@ -1,7 +1,7 @@
 use super::damage_calc::type_effectiveness_modifier;
 use super::items::Items;
 use super::state::PokemonVolatileStatus;
-use crate::choices::MoveCategory;
+use crate::choices::{Choices, MoveCategory};
 use crate::state::{Pokemon, PokemonStatus, State};
 
 const POKEMON_ALIVE: f32 = 60.0;
@@ -44,6 +44,19 @@ const SAFE_GUARD: f32 = 5.0;
 
 const SPIKES: f32 = -12.0;
 
+// extras for under-used gen2 state
+const POKEMON_RECOVERY_MOVE: f32 = 8.0;
+const HOPELESS_MATCHUP: f32 = -50.0;
+const SPEED_TIER_BONUS: f32 = 20.0;
+const ENCORE_PENALTY: f32 = -30.0;
+const DISABLE_PENALTY: f32 = -12.0;
+const RECHARGE_PENALTY: f32 = -35.0;
+const PARTIALLY_TRAPPED_PENALTY: f32 = -15.0;
+const FORESIGHT_PENALTY: f32 = -10.0;
+// PERISH4..PERISH1 = [4..1] turns left; closer to 0 hurts more
+const PERISH_PENALTY: [f32; 4] = [-12.0, -25.0, -50.0, -80.0];
+const FUTURE_SIGHT_INCOMING: f32 = -25.0;
+
 fn evaluate_burned(pokemon: &Pokemon) -> f32 {
     // burn is not as punishing in certain situations
 
@@ -85,6 +98,22 @@ fn has_sleep_talk(pokemon: &Pokemon) -> bool {
     for mv in pokemon.moves.into_iter() {
         if mv.id == crate::choices::Choices::SLEEPTALK {
             return true;
+        }
+    }
+    false
+}
+
+fn has_recovery_move(pokemon: &Pokemon) -> bool {
+    for mv in pokemon.moves.into_iter() {
+        match mv.id {
+            Choices::REST
+            | Choices::RECOVER
+            | Choices::SOFTBOILED
+            | Choices::MILKDRINK
+            | Choices::MOONLIGHT
+            | Choices::MORNINGSUN
+            | Choices::SYNTHESIS => return true,
+            _ => {}
         }
     }
     false
@@ -136,6 +165,10 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
         score += 10.0;
     }
 
+    if has_recovery_move(pokemon) {
+        score += POKEMON_RECOVERY_MOVE;
+    }
+
     if score < 0.0 {
         score = 0.0;
     }
@@ -169,6 +202,15 @@ pub fn evaluate(state: &State) -> f32 {
                         PokemonVolatileStatus::LEECHSEED => score += LEECH_SEED,
                         PokemonVolatileStatus::SUBSTITUTE => score += SUBSTITUTE,
                         PokemonVolatileStatus::CONFUSION => score += CONFUSION,
+                        PokemonVolatileStatus::ENCORE => score += ENCORE_PENALTY,
+                        PokemonVolatileStatus::DISABLE => score += DISABLE_PENALTY,
+                        PokemonVolatileStatus::MUSTRECHARGE => score += RECHARGE_PENALTY,
+                        PokemonVolatileStatus::PARTIALLYTRAPPED => score += PARTIALLY_TRAPPED_PENALTY,
+                        PokemonVolatileStatus::FORESIGHT => score += FORESIGHT_PENALTY,
+                        PokemonVolatileStatus::PERISH4 => score += PERISH_PENALTY[0],
+                        PokemonVolatileStatus::PERISH3 => score += PERISH_PENALTY[1],
+                        PokemonVolatileStatus::PERISH2 => score += PERISH_PENALTY[2],
+                        PokemonVolatileStatus::PERISH1 => score += PERISH_PENALTY[3],
                         _ => {}
                     }
                 }
@@ -196,6 +238,15 @@ pub fn evaluate(state: &State) -> f32 {
                         PokemonVolatileStatus::LEECHSEED => score -= LEECH_SEED,
                         PokemonVolatileStatus::SUBSTITUTE => score -= SUBSTITUTE,
                         PokemonVolatileStatus::CONFUSION => score -= CONFUSION,
+                        PokemonVolatileStatus::ENCORE => score -= ENCORE_PENALTY,
+                        PokemonVolatileStatus::DISABLE => score -= DISABLE_PENALTY,
+                        PokemonVolatileStatus::MUSTRECHARGE => score -= RECHARGE_PENALTY,
+                        PokemonVolatileStatus::PARTIALLYTRAPPED => score -= PARTIALLY_TRAPPED_PENALTY,
+                        PokemonVolatileStatus::FORESIGHT => score -= FORESIGHT_PENALTY,
+                        PokemonVolatileStatus::PERISH4 => score -= PERISH_PENALTY[0],
+                        PokemonVolatileStatus::PERISH3 => score -= PERISH_PENALTY[1],
+                        PokemonVolatileStatus::PERISH2 => score -= PERISH_PENALTY[2],
+                        PokemonVolatileStatus::PERISH1 => score -= PERISH_PENALTY[3],
                         _ => {}
                     }
                 }
@@ -220,6 +271,37 @@ pub fn evaluate(state: &State) -> f32 {
     score -= state.side_two.side_conditions.light_screen as f32 * LIGHT_SCREEN;
     score -= state.side_two.side_conditions.safeguard as f32 * SAFE_GUARD;
     score -= state.side_two.side_conditions.spikes as f32 * SPIKES * side_two_alive_count;
+
+    // hopeless matchup: an active that can't damage the opponent at all is
+    // dead weight this turn (must switch). gen2 has no abilities, so this
+    // collapses purely to type effectiveness.
+    if s1_active.hp > 0 && s1_phys_threat == 0.0 && s1_spec_threat == 0.0 {
+        score += HOPELESS_MATCHUP;
+    }
+    if s2_active.hp > 0 && s2_phys_threat == 0.0 && s2_spec_threat == 0.0 {
+        score -= HOPELESS_MATCHUP;
+    }
+
+    // speed-tier advantage: outspeeding only matters if you can actually hit.
+    // gen2 has no Trick Room, so faster always moves first (paralysis aside).
+    let s1_max_threat = s1_phys_threat.max(s1_spec_threat);
+    let s2_max_threat = s2_phys_threat.max(s2_spec_threat);
+    if s1_active.hp > 0 && s2_active.hp > 0 {
+        if s1_active.speed > s2_active.speed && s1_max_threat > 0.0 {
+            score += SPEED_TIER_BONUS * s1_max_threat;
+        } else if s2_active.speed > s1_active.speed && s2_max_threat > 0.0 {
+            score -= SPEED_TIER_BONUS * s2_max_threat;
+        }
+    }
+
+    // future sight pending damage. Side struct's future_sight = (turns_left, originator).
+    // turns_left > 0 means damage is incoming on THIS side from the originator.
+    if state.side_one.future_sight.0 > 0 {
+        score += FUTURE_SIGHT_INCOMING;
+    }
+    if state.side_two.future_sight.0 > 0 {
+        score -= FUTURE_SIGHT_INCOMING;
+    }
 
     score
 }
