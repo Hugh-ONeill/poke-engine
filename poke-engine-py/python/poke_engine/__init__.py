@@ -181,6 +181,31 @@ def monte_carlo_tree_search_with_priors(
     return MctsResult._from_rust(mcts_with_priors(state, s1_priors, s2_priors, duration_ms))
 
 
+def monte_carlo_tree_search_with_value(
+    state: State,
+    value_net,
+    duration_ms: int = 1000,
+    s1_priors: list = None,
+    s2_priors: list = None,
+    alpha: float = 1.0,
+) -> MctsResult:
+    """
+    MCTS with value-net leaf evaluation (and optional PUCT priors).
+
+    :param state: the state to search through
+    :param value_net: a ValueNet instance (loaded ONNX model)
+    :param duration_ms: time in milliseconds
+    :param s1_priors: optional priors for side_one's moves
+    :param s2_priors: optional priors for side_two's moves
+    :param alpha: leaf-eval mixing weight (0=heuristic only, 1=value net only)
+    :return: the result of the search
+    :rtype: MctsResult
+    """
+    return MctsResult._from_rust(
+        mcts_with_value(state, value_net, duration_ms, s1_priors, s2_priors, alpha)
+    )
+
+
 def monte_carlo_tree_search_multi(
     states: list, duration_ms: int = 1000
 ) -> MctsResult:

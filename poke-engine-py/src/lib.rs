@@ -14,6 +14,10 @@ use poke_engine::instruction::{Instruction, StateInstructions};
 use poke_engine::game::{play_game, play_games, play_games_recorded};
 use poke_engine::engine::evaluate::evaluate;
 use poke_engine::mcts::{perform_mcts, perform_mcts_multi, perform_mcts_with_priors, MctsResult, MctsSideResult};
+#[cfg(feature = "policy")]
+use poke_engine::mcts::perform_mcts_with_value;
+#[cfg(feature = "policy")]
+use poke_engine::policy::ValueNet;
 use poke_engine::pokemon::PokemonName;
 use poke_engine::search::iterative_deepen_expectiminimax;
 use poke_engine::state::{
@@ -950,6 +954,55 @@ fn mcts_with_priors(
     Ok(py_mcts_result)
 }
 
+/// Value-net leaf evaluator. Loads an ONNX value model once; reuse the
+/// instance across many `mcts_with_value` calls to amortize the load cost.
+#[cfg(feature = "policy")]
+#[pyclass(name = "ValueNet", module = "poke_engine")]
+struct PyValueNet {
+    inner: ValueNet,
+}
+
+#[cfg(feature = "policy")]
+#[pymethods]
+impl PyValueNet {
+    #[new]
+    fn new(path: String) -> PyResult<Self> {
+        ValueNet::load(&path)
+            .map(|inner| PyValueNet { inner })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))
+    }
+}
+
+/// MCTS with value-net leaf evaluation. Optionally also takes policy priors
+/// for PUCT selection. Pass `s1_priors`/`s2_priors` for value+policy MCTS,
+/// omit them for pure value-net MCTS.
+#[cfg(feature = "policy")]
+#[pyfunction]
+#[pyo3(signature = (py_state, value_net, duration_ms, s1_priors=None, s2_priors=None, alpha=1.0))]
+fn mcts_with_value(
+    py_state: PyState,
+    value_net: PyRef<PyValueNet>,
+    duration_ms: u64,
+    s1_priors: Option<Vec<f32>>,
+    s2_priors: Option<Vec<f32>>,
+    alpha: f32,
+) -> PyResult<PyMctsResult> {
+    let mut state: State = py_state.into();
+    let duration = Duration::from_millis(duration_ms);
+    let (s1_options, s2_options) = state.root_get_all_options();
+    let mcts_result = perform_mcts_with_value(
+        &mut state,
+        s1_options,
+        s2_options,
+        s1_priors.as_deref(),
+        s2_priors.as_deref(),
+        &value_net.inner,
+        alpha,
+        duration,
+    );
+    Ok(PyMctsResult::from_mcts_result(mcts_result, &state))
+}
+
 #[pyfunction]
 fn mcts_multi(py_states: Vec<PyState>, duration_ms: u64) -> PyResult<PyMctsResult> {
     if py_states.is_empty() {
@@ -1180,6 +1233,11 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(id, m)?)?;
     m.add_function(wrap_pyfunction!(mcts, m)?)?;
     m.add_function(wrap_pyfunction!(mcts_with_priors, m)?)?;
+    #[cfg(feature = "policy")]
+    {
+        m.add_function(wrap_pyfunction!(mcts_with_value, m)?)?;
+        m.add_class::<PyValueNet>()?;
+    }
     m.add_function(wrap_pyfunction!(mcts_multi, m)?)?;
     m.add_function(wrap_pyfunction!(run_games, m)?)?;
     m.add_function(wrap_pyfunction!(run_games_recorded, m)?)?;

@@ -301,13 +301,24 @@ fn do_mcts_with_value_net(
     root_node: &mut Node,
     state: &mut State,
     value_net: &crate::policy::ValueNet,
+    root_eval: &f32,
+    alpha: f32,
 ) {
     let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state) };
     new_node = unsafe { (*new_node).expand(state, s1_move, s2_move) };
-    // use value net instead of handcrafted eval
+    // mix value net with engineered heuristic at non-terminal leaves.
+    // alpha=0 -> pure heuristic (matches plain MCTS), alpha=1 -> pure value net.
     let battle_is_over = state.battle_is_over();
     let rollout_result = if battle_is_over == 0.0 {
-        value_net.evaluate(state)
+        if alpha >= 1.0 {
+            value_net.evaluate(state)
+        } else if alpha <= 0.0 {
+            sigmoid(crate::engine::evaluate::evaluate(state) - root_eval)
+        } else {
+            let v = value_net.evaluate(state);
+            let h = sigmoid(crate::engine::evaluate::evaluate(state) - root_eval);
+            alpha * v + (1.0 - alpha) * h
+        }
     } else if battle_is_over == -1.0 {
         0.0
     } else {
@@ -518,6 +529,9 @@ pub fn perform_mcts_multi(
 
 /// MCTS with value network for leaf evaluation.
 /// Optionally also takes policy priors for PUCT selection.
+/// `alpha` mixes value net with the engineered heuristic at leaves:
+/// rollout = alpha * value_net + (1 - alpha) * sigmoid(eval - root_eval).
+/// alpha=1.0 -> pure value net (legacy behavior); alpha=0.0 -> plain heuristic.
 #[cfg(feature = "policy")]
 pub fn perform_mcts_with_value(
     state: &mut State,
@@ -526,6 +540,7 @@ pub fn perform_mcts_with_value(
     s1_priors: Option<&[f32]>,
     s2_priors: Option<&[f32]>,
     value_net: &crate::policy::ValueNet,
+    alpha: f32,
     max_time: Duration,
 ) -> MctsResult {
     let mut root_node = Node::new();
@@ -544,10 +559,11 @@ pub fn perform_mcts_with_value(
     }
     root_node.root = true;
 
+    let root_eval = crate::engine::evaluate::evaluate(state);
     let start_time = std::time::Instant::now();
     while start_time.elapsed() < max_time {
         for _ in 0..1000 {
-            do_mcts_with_value_net(&mut root_node, state, value_net);
+            do_mcts_with_value_net(&mut root_node, state, value_net, &root_eval, alpha);
         }
         if root_node.times_visited == 10_000_000 {
             break;
