@@ -11,31 +11,33 @@ use crate::choices::{Choices, Effect, MoveCategory, MOVES};
 use crate::engine::items::Items;
 use crate::engine::state::{MoveChoice, Weather};
 use crate::state::{Move, Pokemon, PokemonStatus, PokemonType, Side, State};
+use crate::engine::state::PokemonVolatileStatus;
 use ort::session::Session;
 use std::path::Path;
 use std::sync::Mutex;
 
 // ==================== Constants ====================
 
-const MOVE_FEATURES: usize = 30;       // per move slot
-const POKEMON_FEATURES: usize = 37;    // per pokemon
-const SIDE_EXTRAS: usize = 5;          // per side
+const MOVE_FEATURES: usize = 31;       // per move slot
+const POKEMON_FEATURES: usize = 38;    // per pokemon
+const SIDE_EXTRAS: usize = 12;         // per side
 const GLOBAL_FEATURES: usize = 5;      // weather + speed_cmp + priority
 
-// total: 4*30 + 6*37*2 + 5*2 + 5 = 120 + 444 + 10 + 5 = 579
+// total: 4*31 + 6*38*2 + 12*2 + 5 = 124 + 456 + 24 + 5 = 609
 pub const STATE_FEATURES: usize =
     4 * MOVE_FEATURES + 6 * POKEMON_FEATURES * 2 + SIDE_EXTRAS * 2 + GLOBAL_FEATURES;
 pub const N_ACTIONS: usize = 9;
 
-// 16 gen2 types (matches Python TYPES_V2 order)
-const TYPE_ORDER: [PokemonType; 16] = [
+// 17 gen2 types (matches Python TYPES_V2 order; Steel was added in gen2)
+const TYPE_ORDER: [PokemonType; 17] = [
     PokemonType::NORMAL, PokemonType::FIRE, PokemonType::WATER, PokemonType::ELECTRIC,
     PokemonType::GRASS, PokemonType::ICE, PokemonType::FIGHTING, PokemonType::POISON,
     PokemonType::GROUND, PokemonType::FLYING, PokemonType::PSYCHIC, PokemonType::BUG,
     PokemonType::ROCK, PokemonType::GHOST, PokemonType::DRAGON, PokemonType::DARK,
+    PokemonType::STEEL,
 ];
 
-const N_TYPES: usize = 16;
+const N_TYPES: usize = 17;
 
 // gen2 physical types (category determined by type, not move)
 fn is_physical_type(t: &PokemonType) -> bool {
@@ -46,26 +48,27 @@ fn is_physical_type(t: &PokemonType) -> bool {
     )
 }
 
-// gen2 type chart [attacker][defender] (16x16, no fairy/stellar)
+// gen2 type chart [attacker][defender] (17x17, no fairy/stellar)
 #[rustfmt::skip]
-const TYPE_CHART: [[f32; 16]; 16] = [
-    //       NOR  FIR  WAT  ELE  GRA  ICE  FIG  POI  GRO  FLY  PSY  BUG  ROC  GHO  DRA  DAR
-    /*NOR*/[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0],
-    /*FIR*/[1.0, 0.5, 0.5, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 0.5, 1.0, 0.5, 1.0],
-    /*WAT*/[1.0, 2.0, 0.5, 1.0, 0.5, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.5, 1.0],
-    /*ELE*/[1.0, 1.0, 2.0, 0.5, 0.5, 1.0, 1.0, 1.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0],
-    /*GRA*/[1.0, 0.5, 2.0, 1.0, 0.5, 1.0, 1.0, 0.5, 2.0, 0.5, 1.0, 0.5, 2.0, 1.0, 0.5, 1.0],
-    /*ICE*/[1.0, 0.5, 0.5, 1.0, 2.0, 0.5, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0],
-    /*FIG*/[2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.5, 1.0, 0.5, 0.5, 0.5, 2.0, 0.0, 1.0, 2.0],
-    /*POI*/[1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 0.5, 0.5, 1.0, 1.0, 1.0, 0.5, 0.5, 1.0, 1.0],
-    /*GRO*/[1.0, 2.0, 1.0, 2.0, 0.5, 1.0, 1.0, 2.0, 1.0, 0.0, 1.0, 0.5, 2.0, 1.0, 1.0, 1.0],
-    /*FLY*/[1.0, 1.0, 1.0, 0.5, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 0.5, 1.0, 1.0, 1.0],
-    /*PSY*/[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 1.0, 0.0],
-    /*BUG*/[1.0, 0.5, 1.0, 1.0, 2.0, 1.0, 0.5, 0.5, 1.0, 0.5, 2.0, 1.0, 1.0, 0.5, 1.0, 2.0],
-    /*ROC*/[1.0, 2.0, 1.0, 1.0, 1.0, 2.0, 0.5, 1.0, 0.5, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0],
-    /*GHO*/[0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 0.5],
-    /*DRA*/[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0],
-    /*DAR*/[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 0.5],
+const TYPE_CHART: [[f32; 17]; 17] = [
+    //       NOR  FIR  WAT  ELE  GRA  ICE  FIG  POI  GRO  FLY  PSY  BUG  ROC  GHO  DRA  DAR  STE
+    /*NOR*/[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0, 0.5],
+    /*FIR*/[1.0, 0.5, 0.5, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 0.5, 1.0, 0.5, 1.0, 2.0],
+    /*WAT*/[1.0, 2.0, 0.5, 1.0, 0.5, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.5, 1.0, 1.0],
+    /*ELE*/[1.0, 1.0, 2.0, 0.5, 0.5, 1.0, 1.0, 1.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0],
+    /*GRA*/[1.0, 0.5, 2.0, 1.0, 0.5, 1.0, 1.0, 0.5, 2.0, 0.5, 1.0, 0.5, 2.0, 1.0, 0.5, 1.0, 0.5],
+    /*ICE*/[1.0, 0.5, 0.5, 1.0, 2.0, 0.5, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.5],
+    /*FIG*/[2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.5, 1.0, 0.5, 0.5, 0.5, 2.0, 0.0, 1.0, 2.0, 2.0],
+    /*POI*/[1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 0.5, 0.5, 1.0, 1.0, 1.0, 0.5, 0.5, 1.0, 1.0, 0.0],
+    /*GRO*/[1.0, 2.0, 1.0, 2.0, 0.5, 1.0, 1.0, 2.0, 1.0, 0.0, 1.0, 0.5, 2.0, 1.0, 1.0, 1.0, 2.0],
+    /*FLY*/[1.0, 1.0, 1.0, 0.5, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 0.5, 1.0, 1.0, 1.0, 0.5],
+    /*PSY*/[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 1.0, 0.0, 0.5],
+    /*BUG*/[1.0, 0.5, 1.0, 1.0, 2.0, 1.0, 0.5, 0.5, 1.0, 0.5, 2.0, 1.0, 1.0, 0.5, 1.0, 2.0, 0.5],
+    /*ROC*/[1.0, 2.0, 1.0, 1.0, 1.0, 2.0, 0.5, 1.0, 0.5, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.5],
+    /*GHO*/[0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 0.5, 1.0],
+    /*DRA*/[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.5],
+    /*DAR*/[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 0.5, 1.0],
+    /*STE*/[1.0, 0.5, 0.5, 0.5, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 0.5],
 ];
 
 fn type_index(t: &PokemonType) -> Option<usize> {
@@ -303,26 +306,36 @@ pub fn extract_features(state: &State) -> Vec<f32> {
         idx += POKEMON_FEATURES;
     }
 
-    // ---- side 1 extras (5) ----
-    features[idx] = s1.side_conditions.spikes as f32 / 3.0;
-    features[idx + 1] = if s1.side_conditions.reflect > 0 { 1.0 } else { 0.0 };
-    features[idx + 2] = if s1.side_conditions.light_screen > 0 { 1.0 } else { 0.0 };
-    // has sleeping target on opponent side
-    features[idx + 3] = if (0..6).any(|p| s2.pokemon.pkmn[p].status == PokemonStatus::SLEEP) {
-        1.0
-    } else { 0.0 };
-    // num alive / 6
-    features[idx + 4] = (0..6).filter(|&p| s1.pokemon.pkmn[p].hp > 0).count() as f32 / 6.0;
+    fn write_side_extras(
+        s_self: &Side, s_opp: &Side, self_active: &Pokemon,
+        out: &mut [f32],
+    ) {
+        out[0] = s_self.side_conditions.spikes as f32 / 3.0;
+        out[1] = if s_self.side_conditions.reflect > 0 { 1.0 } else { 0.0 };
+        out[2] = if s_self.side_conditions.light_screen > 0 { 1.0 } else { 0.0 };
+        // has sleeping target on opp side
+        out[3] = if (0..6).any(|p| s_opp.pokemon.pkmn[p].status == PokemonStatus::SLEEP) {
+            1.0
+        } else { 0.0 };
+        // num alive / 6
+        out[4] = (0..6).filter(|&p| s_self.pokemon.pkmn[p].hp > 0).count() as f32 / 6.0;
+        // active volatile statuses (5 binary bits)
+        out[5] = if s_self.volatile_statuses.contains(&PokemonVolatileStatus::SUBSTITUTE) { 1.0 } else { 0.0 };
+        out[6] = if s_self.volatile_statuses.contains(&PokemonVolatileStatus::ENCORE) { 1.0 } else { 0.0 };
+        out[7] = if s_self.volatile_statuses.contains(&PokemonVolatileStatus::DISABLE) { 1.0 } else { 0.0 };
+        out[8] = if s_self.volatile_statuses.contains(&PokemonVolatileStatus::MUSTRECHARGE) { 1.0 } else { 0.0 };
+        out[9] = if s_self.volatile_statuses.contains(&PokemonVolatileStatus::PARTIALLYTRAPPED) { 1.0 } else { 0.0 };
+        // active sleep_turns / 7 and rest_turns / 2
+        out[10] = (self_active.sleep_turns as f32 / 7.0).clamp(0.0, 1.0);
+        out[11] = (self_active.rest_turns as f32 / 2.0).clamp(0.0, 1.0);
+    }
+
+    // ---- side 1 extras (12) ----
+    write_side_extras(s1, s2, s1_active, &mut features[idx..idx + SIDE_EXTRAS]);
     idx += SIDE_EXTRAS;
 
-    // ---- side 2 extras (5) ----
-    features[idx] = s2.side_conditions.spikes as f32 / 3.0;
-    features[idx + 1] = if s2.side_conditions.reflect > 0 { 1.0 } else { 0.0 };
-    features[idx + 2] = if s2.side_conditions.light_screen > 0 { 1.0 } else { 0.0 };
-    features[idx + 3] = if (0..6).any(|p| s1.pokemon.pkmn[p].status == PokemonStatus::SLEEP) {
-        1.0
-    } else { 0.0 };
-    features[idx + 4] = (0..6).filter(|&p| s2.pokemon.pkmn[p].hp > 0).count() as f32 / 6.0;
+    // ---- side 2 extras (12) ----
+    write_side_extras(s2, s1, s2_active, &mut features[idx..idx + SIDE_EXTRAS]);
     idx += SIDE_EXTRAS;
 
     // ---- global (5) ----
@@ -482,7 +495,7 @@ mod tests {
         let state = State::default();
         let features = extract_features(&state);
         assert_eq!(features.len(), STATE_FEATURES);
-        assert_eq!(STATE_FEATURES, 579);
+        assert_eq!(STATE_FEATURES, 609);
     }
 
     #[test]
