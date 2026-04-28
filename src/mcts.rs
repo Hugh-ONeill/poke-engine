@@ -18,7 +18,10 @@ fn sigmoid(x: f32) -> f32 {
 pub struct Node {
     pub root: bool,
     pub parent: *mut Node,
-    pub children: HashMap<(usize, usize), Vec<Node>>,
+    // Box keeps each child Node at a stable heap address so that children of
+    // children (which carry raw `parent: *mut Node` back-pointers) remain valid
+    // when we move a Node out of its parent during MctsTree rebase.
+    pub children: HashMap<(usize, usize), Vec<Box<Node>>>,
     pub times_visited: u32,
 
     // represents the instructions & s1/s2 moves that led to this node from the parent
@@ -137,7 +140,7 @@ impl Node {
         let child_vector = self.children.get_mut(&(s1_mc_index, s2_mc_index));
         match child_vector {
             Some(child_vector) => {
-                let child_vec_ptr = child_vector as *mut Vec<Node>;
+                let child_vec_ptr = child_vector as *mut Vec<Box<Node>>;
                 let chosen_child = self.sample_node(child_vec_ptr);
                 state.apply_instructions(&(*chosen_child).instructions.instruction_list);
                 (*chosen_child).selection(state)
@@ -146,16 +149,16 @@ impl Node {
         }
     }
 
-    unsafe fn sample_node(&self, move_vector: *mut Vec<Node>) -> *mut Node {
+    unsafe fn sample_node(&self, move_vector: *mut Vec<Box<Node>>) -> *mut Node {
         let mut rng = rng();
         let weights: Vec<f64> = (*move_vector)
             .iter()
             .map(|x| x.instructions.percentage as f64)
             .collect();
         let dist = WeightedIndex::new(weights).unwrap();
-        let chosen_node = &mut (&mut *move_vector)[dist.sample(&mut rng)];
-        let chosen_node_ptr = chosen_node as *mut Node;
-        chosen_node_ptr
+        let idx = dist.sample(&mut rng);
+        let chosen_node: &mut Node = &mut *(&mut *move_vector)[idx];
+        chosen_node as *mut Node
     }
 
     pub unsafe fn expand(
@@ -175,9 +178,9 @@ impl Node {
         let should_branch_on_damage = self.root || (*self.parent).root;
         let mut new_instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
-        let mut this_pair_vec = Vec::with_capacity(new_instructions.len());
+        let mut this_pair_vec: Vec<Box<Node>> = Vec::with_capacity(new_instructions.len());
         for state_instructions in new_instructions.drain(..) {
-            let mut new_node = Node::new();
+            let mut new_node = Box::new(Node::new());
             new_node.parent = self;
             new_node.instructions = state_instructions;
             new_node.s1_choice = s1_move_index as u8;
@@ -584,5 +587,106 @@ pub fn perform_mcts_with_value(
                 visits: v.visits,
             }).collect(),
         iteration_count: root_node.times_visited,
+    }
+}
+
+/// Persistent MCTS tree that survives across turns.
+///
+/// Compared to `perform_mcts`, this owns a heap-allocated root Node so the search
+/// tree can be re-rooted into a child after the actual turn is played, preserving
+/// the work done on still-relevant subtrees.
+///
+/// Score calibration note: rollouts use `sigmoid(eval - root_eval)` so retained
+/// Q-values are anchored to the original root_eval. We accept the resulting drift
+/// across turns; visit counts (which determine move choice) remain meaningful.
+pub struct MctsTree {
+    pub root: Box<Node>,
+    pub root_eval: f32,
+}
+
+impl MctsTree {
+    /// Build a fresh tree and run an initial search budget.
+    pub fn new(state: &mut State, max_time: Duration) -> MctsTree {
+        let (s1_options, s2_options) = state.get_all_options();
+        let mut root = Box::new(Node::new());
+        unsafe { root.populate(s1_options, s2_options); }
+        root.root = true;
+        let root_eval = evaluate(state);
+
+        let mut tree = MctsTree { root, root_eval };
+        tree.search(state, max_time);
+        tree
+    }
+
+    /// Continue searching from the current root.
+    pub fn search(&mut self, state: &mut State, max_time: Duration) {
+        let start = std::time::Instant::now();
+        while start.elapsed() < max_time {
+            for _ in 0..1000 {
+                do_mcts(&mut self.root, state, &self.root_eval);
+            }
+            if self.root.times_visited >= 10_000_000 {
+                break;
+            }
+        }
+    }
+
+    /// Snapshot the current root's per-action stats as an MctsResult.
+    pub fn result(&self) -> MctsResult {
+        MctsResult {
+            s1: self.root.s1_options.as_ref().unwrap().iter()
+                .map(|v| MctsSideResult {
+                    move_choice: v.move_choice.clone(),
+                    total_score: v.total_score,
+                    visits: v.visits,
+                }).collect(),
+            s2: self.root.s2_options.as_ref().unwrap().iter()
+                .map(|v| MctsSideResult {
+                    move_choice: v.move_choice.clone(),
+                    total_score: v.total_score,
+                    visits: v.visits,
+                }).collect(),
+            iteration_count: self.root.times_visited,
+        }
+    }
+
+    /// After the actual turn was played, re-root into the child matching the
+    /// played action pair and the realized stochastic outcome.
+    ///
+    /// `applied_instructions` is the Vec<Instruction> that was actually applied
+    /// to the state externally. We match it against the children of the chosen
+    /// (s1_idx, s2_idx) pair.
+    ///
+    /// Returns true if rebase succeeded (subtree retained), false if no matching
+    /// child was found (caller should rebuild the tree from scratch).
+    pub fn rebase(
+        &mut self,
+        s1_idx: usize,
+        s2_idx: usize,
+        applied_instructions: &[crate::instruction::Instruction],
+        new_state: &mut State,
+    ) -> bool {
+        // pull the children Vec out of the HashMap; if absent, we never expanded
+        // this action pair and have nothing to keep.
+        let mut child_vec = match self.root.children.remove(&(s1_idx, s2_idx)) {
+            Some(v) => v,
+            None => return false,
+        };
+        let match_idx = child_vec.iter().position(|n| {
+            n.instructions.instruction_list == applied_instructions
+        });
+        let Some(match_idx) = match_idx else {
+            return false;
+        };
+        // remove(match_idx) takes ownership of the Box<Node>; siblings drop with
+        // the Vec at end of scope, and the old root drops when self.root is replaced.
+        let mut new_root = child_vec.remove(match_idx);
+        new_root.parent = std::ptr::null_mut();
+        new_root.root = true;
+        // children of the new root retain raw parent pointers to its Box-heap
+        // address, which is unchanged by this move (Box owns a stable allocation).
+        self.root = new_root;
+        self.root_eval = evaluate(new_state);
+        true
     }
 }
