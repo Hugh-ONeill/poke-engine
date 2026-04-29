@@ -13,7 +13,7 @@ use poke_engine::engine::state::{MoveChoice, PokemonVolatileStatus, Terrain, Wea
 use poke_engine::instruction::{Instruction, StateInstructions};
 use poke_engine::game::{play_game, play_games, play_games_recorded};
 use poke_engine::engine::evaluate::evaluate;
-use poke_engine::mcts::{perform_mcts, perform_mcts_multi, perform_mcts_with_priors, MctsResult, MctsSideResult, MctsTree};
+use poke_engine::mcts::{perform_mcts, perform_mcts_multi, perform_mcts_with_priors, MctsResult, MctsSideResult};
 #[cfg(feature = "policy")]
 use poke_engine::mcts::perform_mcts_with_value;
 #[cfg(feature = "policy")]
@@ -954,75 +954,6 @@ fn mcts_with_priors(
     Ok(py_mcts_result)
 }
 
-/// Persistent MCTS tree that reuses search work across turns.
-///
-/// Use case: instead of calling `mcts(state, ms)` per turn (rebuilding the tree
-/// from scratch each time), construct an `MctsTree` once and call `search` each
-/// turn. After applying the realized turn instructions to the state externally,
-/// call `rebase` to promote the matching subtree to the new root, retaining its
-/// accumulated visits and Q-values.
-#[pyclass(name = "MctsTree", module = "poke_engine", unsendable)]
-struct PyMctsTree {
-    inner: MctsTree,
-}
-
-#[pymethods]
-impl PyMctsTree {
-    /// Build a tree and run an initial search budget on the given state.
-    #[new]
-    fn new(py_state: PyState, duration_ms: u64) -> PyResult<Self> {
-        let mut state: State = py_state.into();
-        let duration = Duration::from_millis(duration_ms);
-        let inner = MctsTree::new(&mut state, duration);
-        Ok(PyMctsTree { inner })
-    }
-
-    /// Continue searching from the current root for `duration_ms` more time.
-    /// Caller must pass the state matching this tree's root.
-    fn search(&mut self, py_state: PyState, duration_ms: u64) {
-        let mut state: State = py_state.into();
-        let duration = Duration::from_millis(duration_ms);
-        self.inner.search(&mut state, duration);
-    }
-
-    /// Snapshot the current root's per-action visits and Q-values.
-    fn result(&self, py_state: PyState) -> PyResult<PyMctsResult> {
-        let state: State = py_state.into();
-        Ok(PyMctsResult::from_mcts_result(self.inner.result(), &state))
-    }
-
-    /// After a turn was played, promote the matching subtree to the new root.
-    ///
-    /// `s1_idx`, `s2_idx`: indices into the previous root's s1_options/s2_options
-    ///     identifying the played action pair.
-    /// `applied_instructions`: the realized stochastic outcome (the
-    ///     PyStateInstructions object that was passed to `state.apply_instructions`).
-    /// `new_state`: the post-turn state.
-    ///
-    /// Returns True if the matching subtree was found and retained; False if the
-    /// subtree was never expanded during search (caller should rebuild from scratch).
-    fn rebase(
-        &mut self,
-        s1_idx: usize,
-        s2_idx: usize,
-        applied_instructions: PyRef<PyStateInstructions>,
-        new_state: PyState,
-    ) -> PyResult<bool> {
-        let mut state: State = new_state.into();
-        let target_instrs: Vec<Instruction> = applied_instructions
-            .instruction_list
-            .iter()
-            .map(|pi| pi.instruction.clone())
-            .collect();
-        Ok(self.inner.rebase(s1_idx, s2_idx, &target_instrs, &mut state))
-    }
-
-    /// Total number of simulations under the current root.
-    fn iteration_count(&self) -> u32 {
-        self.inner.root.times_visited
-    }
-}
-
 /// Value-net leaf evaluator. Loads an ONNX value model once; reuse the
 /// instance across many `mcts_with_value` calls to amortize the load cost.
 #[cfg(feature = "policy")]
@@ -1302,7 +1233,6 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(id, m)?)?;
     m.add_function(wrap_pyfunction!(mcts, m)?)?;
     m.add_function(wrap_pyfunction!(mcts_with_priors, m)?)?;
-    m.add_class::<PyMctsTree>()?;
     #[cfg(feature = "policy")]
     {
         m.add_function(wrap_pyfunction!(mcts_with_value, m)?)?;
