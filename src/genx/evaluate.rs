@@ -199,22 +199,32 @@ fn evaluate_hazards(pokemon: &Pokemon, side: &Side) -> f32 {
 const HOPELESS_MATCHUP: f32 = -50.0;
 const SPEED_TIER_BONUS: f32 = 20.0;
 
-/// How well can this pokemon hit the defender? Returns (physical_threat, special_threat)
-/// each clamped to [0.0, 1.0]. type_effectiveness_modifier already handles terastallization,
-/// Levitate, etc.
-fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32) {
+/// How well can this pokemon hit the defender? Returns (physical_threat, special_threat,
+/// status_move_count). The third value is used to gate HOPELESS_MATCHUP: support walls
+/// typically run 2+ status moves (recovery + utility), setup attackers usually 1 status
+/// move + 3 attacks. Threshold of >=2 separates "real support" from "attacker with one
+/// boost move" while still flagging the latter as dead weight when its attacks are 0x.
+/// type_effectiveness_modifier already handles terastallization, Levitate, etc.
+fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, u8) {
     let mut best_phys: f32 = 0.0;
     let mut best_spec: f32 = 0.0;
+    let mut status_count: u8 = 0;
     for mv in attacker.moves.into_iter() {
         if mv.id == Choices::NONE { continue; }
-        let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
         match mv.choice.category {
-            MoveCategory::Physical => best_phys = best_phys.max(eff),
-            MoveCategory::Special => best_spec = best_spec.max(eff),
+            MoveCategory::Physical => {
+                let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
+                best_phys = best_phys.max(eff);
+            }
+            MoveCategory::Special => {
+                let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
+                best_spec = best_spec.max(eff);
+            }
+            MoveCategory::Status => status_count += 1,
             _ => {}
         }
     }
-    (best_phys.min(1.0), best_spec.min(1.0))
+    (best_phys.min(1.0), best_spec.min(1.0), status_count)
 }
 
 // 18 standard offensive types — used as a fixed probe set for tera defensive value.
@@ -458,8 +468,8 @@ pub fn evaluate(state: &State) -> f32 {
 
     let s1_active = &state.side_one.pokemon[state.side_one.active_index];
     let s2_active = &state.side_two.pokemon[state.side_two.active_index];
-    let (s1_phys, s1_spec) = threat_vs(s1_active, s2_active);
-    let (s2_phys, s2_spec) = threat_vs(s2_active, s1_active);
+    let (s1_phys, s1_spec, s1_status_n) = threat_vs(s1_active, s2_active);
+    let (s2_phys, s2_spec, s2_status_n) = threat_vs(s2_active, s1_active);
 
     let mut iter = state.side_one.pokemon.into_iter();
     let mut s1_used_tera = false;
@@ -559,13 +569,13 @@ pub fn evaluate(state: &State) -> f32 {
         }
     }
 
-    // Hopeless matchup: an active that can't damage the opponent at all is dead weight
-    // and forced to switch — heavy penalty. Modern engine: covers Levitate, Wonder Guard,
-    // tera-induced immunities, etc.
-    if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 {
+    // Hopeless matchup: active can't damage the opponent at all. Suppressed when the mon
+    // has 2+ status moves (typical of support walls — recovery + utility); attackers with
+    // a single setup move still trigger HOPELESS when their attacks are 0x.
+    if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 && s1_status_n < 2 {
         score += HOPELESS_MATCHUP;
     }
-    if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 {
+    if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 && s2_status_n < 2 {
         score -= HOPELESS_MATCHUP;
     }
 
