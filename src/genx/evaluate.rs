@@ -1,8 +1,8 @@
 use super::abilities::Abilities;
 use super::items::Items;
-use super::state::PokemonVolatileStatus;
+use super::state::{PokemonVolatileStatus, Terrain, Weather};
 use crate::choices::MoveCategory;
-use crate::state::{Pokemon, PokemonStatus, Side, State};
+use crate::state::{Pokemon, PokemonStatus, PokemonType, Side, State};
 
 const POKEMON_ALIVE: f32 = 30.0;
 const POKEMON_HP: f32 = 100.0;
@@ -50,6 +50,23 @@ const STEALTH_ROCK: f32 = -10.0;
 const SPIKES: f32 = -7.0;
 const TOXIC_SPIKES: f32 = -7.0;
 const STICKY_WEB: f32 = -25.0;
+
+// Weather / terrain — applied to the active mon on each side.
+// Speed-doubling weather abilities are large because outspeeding flips matchups outright.
+// Type/passive numbers are smaller — meaningful but not dominant.
+const WEATHER_TYPE_BOOSTED: f32 = 8.0;
+const WEATHER_TYPE_SUPPRESSED: f32 = -8.0;
+const WEATHER_SPEED_ABILITY: f32 = 25.0;
+const WEATHER_PASSIVE_DAMAGE: f32 = -8.0;
+const WEATHER_PASSIVE_HEAL: f32 = 6.0;
+const WEATHER_ABILITY_MINOR: f32 = 5.0;
+
+const TERRAIN_GRASSY_HEAL: f32 = 5.0;
+const TERRAIN_MISTY_STATUS_BLOCK: f32 = 12.0;
+const TERRAIN_MISTY_DRAGON_RESIST: f32 = 4.0;
+const TERRAIN_ELECTRIC_SLEEP_BLOCK: f32 = 8.0;
+const TERRAIN_PSYCHIC_PRIORITY_BLOCK: f32 = 4.0;
+const TERRAIN_TYPE_BOOSTED: f32 = 5.0;
 
 fn evaluate_poison(pokemon: &Pokemon, base_score: f32) -> f32 {
     match pokemon.ability {
@@ -124,6 +141,99 @@ fn evaluate_hazards(pokemon: &Pokemon, side: &Side) -> f32 {
         }
     }
 
+    score
+}
+
+fn evaluate_weather_for_active(pokemon: &Pokemon, weather: Weather) -> f32 {
+    let mut score = 0.0;
+    match weather {
+        Weather::SUN | Weather::HARSHSUN => {
+            if pokemon.has_type(&PokemonType::FIRE) { score += WEATHER_TYPE_BOOSTED; }
+            if pokemon.has_type(&PokemonType::WATER) { score += WEATHER_TYPE_SUPPRESSED; }
+            match pokemon.ability {
+                Abilities::CHLOROPHYLL => score += WEATHER_SPEED_ABILITY,
+                Abilities::SOLARPOWER => score += WEATHER_ABILITY_MINOR,
+                Abilities::FLOWERGIFT => score += WEATHER_ABILITY_MINOR,
+                Abilities::LEAFGUARD => score += WEATHER_ABILITY_MINOR,
+                Abilities::DRYSKIN => score += WEATHER_PASSIVE_DAMAGE,
+                _ => {}
+            }
+        }
+        Weather::RAIN | Weather::HEAVYRAIN => {
+            if pokemon.has_type(&PokemonType::WATER) { score += WEATHER_TYPE_BOOSTED; }
+            if pokemon.has_type(&PokemonType::FIRE) { score += WEATHER_TYPE_SUPPRESSED; }
+            match pokemon.ability {
+                Abilities::SWIFTSWIM => score += WEATHER_SPEED_ABILITY,
+                Abilities::RAINDISH => score += WEATHER_PASSIVE_HEAL,
+                Abilities::DRYSKIN => score += WEATHER_PASSIVE_HEAL,
+                Abilities::HYDRATION => score += WEATHER_ABILITY_MINOR,
+                _ => {}
+            }
+        }
+        Weather::SAND => {
+            if pokemon.has_type(&PokemonType::ROCK) { score += WEATHER_TYPE_BOOSTED; }
+            let immune_to_chip = pokemon.has_type(&PokemonType::ROCK)
+                || pokemon.has_type(&PokemonType::GROUND)
+                || pokemon.has_type(&PokemonType::STEEL)
+                || matches!(pokemon.ability,
+                    Abilities::MAGICGUARD | Abilities::OVERCOAT
+                    | Abilities::SANDVEIL | Abilities::SANDFORCE | Abilities::SANDRUSH);
+            if !immune_to_chip { score += WEATHER_PASSIVE_DAMAGE; }
+            match pokemon.ability {
+                Abilities::SANDRUSH => score += WEATHER_SPEED_ABILITY,
+                Abilities::SANDFORCE => score += WEATHER_ABILITY_MINOR,
+                Abilities::SANDVEIL => score += WEATHER_ABILITY_MINOR,
+                _ => {}
+            }
+        }
+        Weather::HAIL | Weather::SNOW => {
+            if pokemon.has_type(&PokemonType::ICE) { score += WEATHER_TYPE_BOOSTED; }
+            if weather == Weather::HAIL {
+                let immune_to_chip = pokemon.has_type(&PokemonType::ICE)
+                    || matches!(pokemon.ability,
+                        Abilities::MAGICGUARD | Abilities::OVERCOAT
+                        | Abilities::ICEBODY | Abilities::SNOWCLOAK | Abilities::SLUSHRUSH);
+                if !immune_to_chip { score += WEATHER_PASSIVE_DAMAGE; }
+            }
+            match pokemon.ability {
+                Abilities::SLUSHRUSH => score += WEATHER_SPEED_ABILITY,
+                Abilities::ICEBODY => score += WEATHER_PASSIVE_HEAL,
+                Abilities::SNOWCLOAK => score += WEATHER_ABILITY_MINOR,
+                _ => {}
+            }
+        }
+        Weather::NONE => {}
+    }
+    score
+}
+
+fn evaluate_terrain_for_active(pokemon: &Pokemon, terrain: Terrain) -> f32 {
+    if !pokemon.is_grounded() { return 0.0; }
+    let mut score = 0.0;
+    match terrain {
+        Terrain::ELECTRICTERRAIN => {
+            score += TERRAIN_ELECTRIC_SLEEP_BLOCK;
+            if pokemon.has_type(&PokemonType::ELECTRIC) { score += TERRAIN_TYPE_BOOSTED; }
+            if pokemon.ability == Abilities::SURGESURFER { score += WEATHER_SPEED_ABILITY; }
+        }
+        Terrain::GRASSYTERRAIN => {
+            score += TERRAIN_GRASSY_HEAL;
+            if pokemon.has_type(&PokemonType::GRASS) { score += TERRAIN_TYPE_BOOSTED; }
+            if pokemon.ability == Abilities::GRASSPELT { score += WEATHER_ABILITY_MINOR; }
+        }
+        Terrain::MISTYTERRAIN => {
+            score += TERRAIN_MISTY_STATUS_BLOCK;
+            // dragon damage halved against grounded non-fairy mons
+            if !pokemon.has_type(&PokemonType::FAIRY) {
+                score += TERRAIN_MISTY_DRAGON_RESIST;
+            }
+        }
+        Terrain::PSYCHICTERRAIN => {
+            score += TERRAIN_PSYCHIC_PRIORITY_BLOCK;
+            if pokemon.has_type(&PokemonType::PSYCHIC) { score += TERRAIN_TYPE_BOOSTED; }
+        }
+        Terrain::NONE => {}
+    }
     score
 }
 
@@ -238,6 +348,30 @@ pub fn evaluate(state: &State) -> f32 {
     score -= state.side_two.side_conditions.safeguard as f32 * SAFE_GUARD;
     score -= state.side_two.side_conditions.tailwind as f32 * TAILWIND;
     score -= state.side_two.side_conditions.healing_wish as f32 * HEALING_WISH;
+
+    let weather = state.weather.weather_type;
+    if weather != Weather::NONE {
+        let s1_active = state.side_one.get_active_immutable();
+        let s2_active = state.side_two.get_active_immutable();
+        if s1_active.hp > 0 {
+            score += evaluate_weather_for_active(s1_active, weather);
+        }
+        if s2_active.hp > 0 {
+            score -= evaluate_weather_for_active(s2_active, weather);
+        }
+    }
+
+    let terrain = state.terrain.terrain_type;
+    if terrain != Terrain::NONE {
+        let s1_active = state.side_one.get_active_immutable();
+        let s2_active = state.side_two.get_active_immutable();
+        if s1_active.hp > 0 {
+            score += evaluate_terrain_for_active(s1_active, terrain);
+        }
+        if s2_active.hp > 0 {
+            score -= evaluate_terrain_for_active(s2_active, terrain);
+        }
+    }
 
     score
 }
