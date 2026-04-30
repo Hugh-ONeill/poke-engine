@@ -1,4 +1,5 @@
 use super::abilities::Abilities;
+use super::damage_calc::type_effectiveness_modifier;
 use super::items::Items;
 use super::state::{PokemonVolatileStatus, Terrain, Weather};
 use crate::choices::MoveCategory;
@@ -109,6 +110,16 @@ const PARADOX_SPA: f32 = 18.0;  // 0.6 * POKEMON_SPECIAL_ATTACK_BOOST
 const PARADOX_SPD: f32 = 9.0;   // 0.6 * POKEMON_SPECIAL_DEFENSE_BOOST
 const PARADOX_SPE: f32 = 30.0;  // 1.0 * POKEMON_SPEED_BOOST
 
+// Tera bonuses applied to the active mon while terastallized. Offsets the flat
+// USED_TERA = -75 cost to the side: a useful tera (good defensive type + STAB
+// available) recovers ~30 of the 75, leaving a net cost that the search can pay
+// when the matchup justifies it.
+const TERA_RESIST_BONUS: f32 = 2.0;     // per resisted common attack type
+const TERA_DOUBLE_RESIST_BONUS: f32 = 3.0; // 0.25x (only possible vs same-type)
+const TERA_IMMUNE_BONUS: f32 = 6.0;     // immune to a common attack type
+const TERA_WEAK_PENALTY: f32 = -2.0;    // 2x weakness
+const TERA_STAB_AVAILABLE: f32 = 12.0;  // active has a damaging tera_type move
+
 fn evaluate_poison(pokemon: &Pokemon, base_score: f32) -> f32 {
     match pokemon.ability {
         Abilities::POISONHEAL => 15.0,
@@ -182,6 +193,49 @@ fn evaluate_hazards(pokemon: &Pokemon, side: &Side) -> f32 {
         }
     }
 
+    score
+}
+
+// 18 standard offensive types — used as a fixed probe set for tera defensive value.
+const COMMON_ATTACK_TYPES: [PokemonType; 18] = [
+    PokemonType::NORMAL, PokemonType::FIRE, PokemonType::WATER, PokemonType::ELECTRIC,
+    PokemonType::GRASS, PokemonType::ICE, PokemonType::FIGHTING, PokemonType::POISON,
+    PokemonType::GROUND, PokemonType::FLYING, PokemonType::PSYCHIC, PokemonType::BUG,
+    PokemonType::ROCK, PokemonType::GHOST, PokemonType::DRAGON, PokemonType::DARK,
+    PokemonType::STEEL, PokemonType::FAIRY,
+];
+
+// Defensive value of the active mon's current typing (post-tera if terastallized,
+// since type_effectiveness_modifier handles that). Sums signed bonuses across the
+// fixed offensive-type probe set. Only invoked for terastallized actives so far —
+// otherwise it would partially duplicate type-aware signals already implicit in
+// the search's damage rollouts.
+fn evaluate_tera_active(pokemon: &Pokemon) -> f32 {
+    if !pokemon.terastallized {
+        return 0.0;
+    }
+    let mut score = 0.0;
+    for atk in COMMON_ATTACK_TYPES.iter() {
+        let mult = type_effectiveness_modifier(atk, pokemon);
+        if mult == 0.0 {
+            score += TERA_IMMUNE_BONUS;
+        } else if mult <= 0.25 {
+            score += TERA_DOUBLE_RESIST_BONUS;
+        } else if mult <= 0.5 {
+            score += TERA_RESIST_BONUS;
+        } else if mult >= 2.0 {
+            score += TERA_WEAK_PENALTY;
+        }
+    }
+    // STAB on tera_type: 2x instead of 1.5x. Credit if any damaging move matches.
+    for mv in pokemon.moves.into_iter() {
+        if mv.choice.move_type == pokemon.tera_type
+            && mv.choice.category != MoveCategory::Status
+        {
+            score += TERA_STAB_AVAILABLE;
+            break;
+        }
+    }
     score
 }
 
@@ -386,6 +440,7 @@ pub fn evaluate(state: &State) -> f32 {
             score += evaluate_hazards(pkmn, &state.side_one);
             if iter.pokemon_index == state.side_one.active_index {
                 score += evaluate_active_volatiles(pkmn, &state.side_one);
+                score += evaluate_tera_active(pkmn);
 
                 score += get_boost_multiplier(state.side_one.attack_boost) * POKEMON_ATTACK_BOOST;
                 score += get_boost_multiplier(state.side_one.defense_boost) * POKEMON_DEFENSE_BOOST;
@@ -412,6 +467,7 @@ pub fn evaluate(state: &State) -> f32 {
 
             if iter.pokemon_index == state.side_two.active_index {
                 score -= evaluate_active_volatiles(pkmn, &state.side_two);
+                score -= evaluate_tera_active(pkmn);
 
                 score -= get_boost_multiplier(state.side_two.attack_boost) * POKEMON_ATTACK_BOOST;
                 score -= get_boost_multiplier(state.side_two.defense_boost) * POKEMON_DEFENSE_BOOST;
