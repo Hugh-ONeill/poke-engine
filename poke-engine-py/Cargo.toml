@@ -15,4 +15,6 @@ poke-engine = { path = "../" }
 [features]
 default = ["poke-engine/gen4"]
 gen2 = ["poke-engine/gen2"]
+gen9 = ["poke-engine/gen9"]
+terastallization = ["poke-engine/terastallization"]
 policy = ["poke-engine/policy"]

@@ -926,6 +926,12 @@ impl PyIterativeDeepeningResult {
     }
 }
 
+#[pyfunction(name = "evaluate")]
+fn py_evaluate(py_state: PyState) -> PyResult<f32> {
+    let state: State = py_state.into();
+    Ok(evaluate(&state))
+}
+
 #[pyfunction]
 fn mcts(py_state: PyState, duration_ms: u64) -> PyResult<PyMctsResult> {
     let mut state: State = py_state.into();
@@ -1231,6 +1237,7 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calculate_damage, m)?)?;
     m.add_function(wrap_pyfunction!(generate_instructions, m)?)?;
     m.add_function(wrap_pyfunction!(id, m)?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate, m)?)?;
     m.add_function(wrap_pyfunction!(mcts, m)?)?;
     m.add_function(wrap_pyfunction!(mcts_with_priors, m)?)?;
     #[cfg(feature = "policy")]

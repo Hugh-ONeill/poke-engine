@@ -92,10 +92,19 @@ const STATUS_ORDER: [PokemonStatus; 7] = [
     PokemonStatus::TOXIC,
 ];
 
-// item ordering (trimmed for gen2)
+// item ordering (gen2-tuned for v2 feature extractor; only used by gen2 value net)
+#[cfg(feature = "gen2")]
 const ITEM_ORDER_V2: [Items; 5] = [
     Items::LEFTOVERS, Items::THICKCLUB, Items::LIGHTBALL,
     Items::MIRACLEBERRY, Items::MINTBERRY,
+];
+
+// placeholder slots for non-gen2 builds — v2 features aren't trained for modern gens,
+// but the feature extractor still has to compile. A gen9 extractor would be a separate v3.
+#[cfg(not(feature = "gen2"))]
+const ITEM_ORDER_V2: [Items; 5] = [
+    Items::LEFTOVERS, Items::CHOICEBAND, Items::CHOICESCARF,
+    Items::CHOICESPECS, Items::LIFEORB,
 ];
 
 // ==================== Boost Calculation ====================
@@ -467,6 +476,10 @@ fn map_priors_to_options(probs: &[f32], options: &[MoveChoice], side: &Side) -> 
     for opt in options {
         let idx = match opt {
             MoveChoice::Move(move_idx) => *move_idx as usize,
+            #[cfg(not(any(feature = "gen1", feature = "gen2", feature = "gen3")))]
+            MoveChoice::MoveTera(move_idx) => *move_idx as usize,
+            #[cfg(not(any(feature = "gen1", feature = "gen2", feature = "gen3")))]
+            MoveChoice::MoveMega(move_idx) => *move_idx as usize,
             MoveChoice::Switch(pkmn_idx) => {
                 let target = *pkmn_idx as usize;
                 let active = side.active_index as usize;
