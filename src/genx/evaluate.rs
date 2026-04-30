@@ -68,6 +68,39 @@ const TERRAIN_ELECTRIC_SLEEP_BLOCK: f32 = 8.0;
 const TERRAIN_PSYCHIC_PRIORITY_BLOCK: f32 = 4.0;
 const TERRAIN_TYPE_BOOSTED: f32 = 5.0;
 
+// Pending side-level effects (stored on the side that benefits).
+const WISH_PENDING: f32 = 15.0;
+const FUTURE_SIGHT_PENDING: f32 = 18.0;
+
+// Perish song — counter on active. PERISH1 ≈ KO next turn (~POKEMON_HP + POKEMON_ALIVE).
+const PERISH_1: f32 = -120.0;
+const PERISH_2: f32 = -50.0;
+const PERISH_3: f32 = -20.0;
+const PERISH_4: f32 = -10.0;
+
+// Active volatile statuses beyond the existing LEECHSEED/SUBSTITUTE/CONFUSION.
+const ENCORE: f32 = -25.0;
+const TAUNT: f32 = -15.0;
+const YAWN: f32 = -25.0;          // mirrors POKEMON_ASLEEP — landing next turn
+const SALTCURE: f32 = -15.0;
+const SALTCURE_WEAK: f32 = -30.0; // water/steel take 1/4
+const DESTINY_BOND: f32 = 5.0;
+const DISABLE: f32 = -10.0;
+const TORMENT: f32 = -10.0;
+const HEAL_BLOCK: f32 = -15.0;
+const OCTOLOCK: f32 = -20.0;
+const PARTIALLY_TRAPPED: f32 = -8.0;
+const INGRAIN: f32 = 8.0;
+const AQUA_RING: f32 = 6.0;
+const MAGNET_RISE: f32 = 5.0;
+const TAR_SHOT: f32 = -5.0;
+const GLAIVE_RUSH: f32 = -30.0;
+const SLOW_START: f32 = -25.0;
+const FOCUS_ENERGY: f32 = 5.0;
+const LASER_FOCUS: f32 = 8.0;
+const NIGHTMARE_VS: f32 = -15.0;  // only relevant when asleep — but ENGINE only sets it then
+const CURSE_ON_ACTIVE: f32 = -25.0;
+
 fn evaluate_poison(pokemon: &Pokemon, base_score: f32) -> f32 {
     match pokemon.ability {
         Abilities::POISONHEAL => 15.0,
@@ -141,6 +174,64 @@ fn evaluate_hazards(pokemon: &Pokemon, side: &Side) -> f32 {
         }
     }
 
+    score
+}
+
+fn evaluate_active_volatiles(pokemon: &Pokemon, side: &Side) -> f32 {
+    let mut score = 0.0;
+    for vs in side.volatile_statuses.iter() {
+        match vs {
+            PokemonVolatileStatus::LEECHSEED => score += LEECH_SEED,
+            PokemonVolatileStatus::SUBSTITUTE => score += SUBSTITUTE,
+            PokemonVolatileStatus::CONFUSION => score += CONFUSION,
+            PokemonVolatileStatus::PERISH1 => score += PERISH_1,
+            PokemonVolatileStatus::PERISH2 => score += PERISH_2,
+            PokemonVolatileStatus::PERISH3 => score += PERISH_3,
+            PokemonVolatileStatus::PERISH4 => score += PERISH_4,
+            PokemonVolatileStatus::ENCORE => score += ENCORE,
+            PokemonVolatileStatus::TAUNT => score += TAUNT,
+            PokemonVolatileStatus::DISABLE => score += DISABLE,
+            PokemonVolatileStatus::TORMENT => score += TORMENT,
+            PokemonVolatileStatus::HEALBLOCK => score += HEAL_BLOCK,
+            PokemonVolatileStatus::OCTOLOCK => score += OCTOLOCK,
+            PokemonVolatileStatus::YAWN => score += YAWN,
+            PokemonVolatileStatus::SALTCURE => {
+                if pokemon.has_type(&PokemonType::WATER)
+                    || pokemon.has_type(&PokemonType::STEEL)
+                {
+                    score += SALTCURE_WEAK;
+                } else {
+                    score += SALTCURE;
+                }
+            }
+            PokemonVolatileStatus::PARTIALLYTRAPPED => score += PARTIALLY_TRAPPED,
+            PokemonVolatileStatus::TARSHOT => score += TAR_SHOT,
+            PokemonVolatileStatus::GLAIVERUSH => score += GLAIVE_RUSH,
+            PokemonVolatileStatus::SLOWSTART => score += SLOW_START,
+            PokemonVolatileStatus::NIGHTMARE => score += NIGHTMARE_VS,
+            PokemonVolatileStatus::CURSE => score += CURSE_ON_ACTIVE,
+            PokemonVolatileStatus::INGRAIN => score += INGRAIN,
+            PokemonVolatileStatus::AQUARING => score += AQUA_RING,
+            PokemonVolatileStatus::MAGNETRISE => score += MAGNET_RISE,
+            PokemonVolatileStatus::DESTINYBOND => score += DESTINY_BOND,
+            PokemonVolatileStatus::FOCUSENERGY => score += FOCUS_ENERGY,
+            PokemonVolatileStatus::LASERFOCUS => score += LASER_FOCUS,
+            _ => {}
+        }
+    }
+    score
+}
+
+// Wish heals the side that has it pending; future_sight is stored on the caster's
+// side and lands on the opponent. Both score positive for the side they're set on.
+fn evaluate_pending_effects(side: &Side) -> f32 {
+    let mut score = 0.0;
+    if side.future_sight.0 > 0 {
+        score += FUTURE_SIGHT_PENDING;
+    }
+    if side.wish.0 > 0 {
+        score += WISH_PENDING;
+    }
     score
 }
 
@@ -276,14 +367,7 @@ pub fn evaluate(state: &State) -> f32 {
             score += evaluate_pokemon(pkmn);
             score += evaluate_hazards(pkmn, &state.side_one);
             if iter.pokemon_index == state.side_one.active_index {
-                for vs in state.side_one.volatile_statuses.iter() {
-                    match vs {
-                        PokemonVolatileStatus::LEECHSEED => score += LEECH_SEED,
-                        PokemonVolatileStatus::SUBSTITUTE => score += SUBSTITUTE,
-                        PokemonVolatileStatus::CONFUSION => score += CONFUSION,
-                        _ => {}
-                    }
-                }
+                score += evaluate_active_volatiles(pkmn, &state.side_one);
 
                 score += get_boost_multiplier(state.side_one.attack_boost) * POKEMON_ATTACK_BOOST;
                 score += get_boost_multiplier(state.side_one.defense_boost) * POKEMON_DEFENSE_BOOST;
@@ -309,14 +393,7 @@ pub fn evaluate(state: &State) -> f32 {
             score -= evaluate_hazards(pkmn, &state.side_two);
 
             if iter.pokemon_index == state.side_two.active_index {
-                for vs in state.side_two.volatile_statuses.iter() {
-                    match vs {
-                        PokemonVolatileStatus::LEECHSEED => score -= LEECH_SEED,
-                        PokemonVolatileStatus::SUBSTITUTE => score -= SUBSTITUTE,
-                        PokemonVolatileStatus::CONFUSION => score -= CONFUSION,
-                        _ => {}
-                    }
-                }
+                score -= evaluate_active_volatiles(pkmn, &state.side_two);
 
                 score -= get_boost_multiplier(state.side_two.attack_boost) * POKEMON_ATTACK_BOOST;
                 score -= get_boost_multiplier(state.side_two.defense_boost) * POKEMON_DEFENSE_BOOST;
@@ -348,6 +425,9 @@ pub fn evaluate(state: &State) -> f32 {
     score -= state.side_two.side_conditions.safeguard as f32 * SAFE_GUARD;
     score -= state.side_two.side_conditions.tailwind as f32 * TAILWIND;
     score -= state.side_two.side_conditions.healing_wish as f32 * HEALING_WISH;
+
+    score += evaluate_pending_effects(&state.side_one);
+    score -= evaluate_pending_effects(&state.side_two);
 
     let weather = state.weather.weather_type;
     if weather != Weather::NONE {
