@@ -569,14 +569,16 @@ pub fn evaluate(state: &State) -> f32 {
         }
     }
 
-    // Hopeless matchup: active can't damage the opponent at all. Suppressed when the mon
-    // has 2+ status moves (typical of support walls — recovery + utility); attackers with
-    // a single setup move still trigger HOPELESS when their attacks are 0x.
-    if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 && s1_status_n < 2 {
-        score += HOPELESS_MATCHUP;
+    // Hopeless matchup: active can't damage the opponent at all. Magnitude scales by
+    // status-move presence — full -50 for pure attackers (no status moves at all),
+    // half magnitude when the mon has any status move (still-mostly-dead-weight, but
+    // can at least set hazards / recover / setup before swapping out).
+    let hopeless_mag = |status_n: u8| if status_n == 0 { HOPELESS_MATCHUP } else { HOPELESS_MATCHUP * 0.5 };
+    if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 {
+        score += hopeless_mag(s1_status_n);
     }
-    if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 && s2_status_n < 2 {
-        score -= HOPELESS_MATCHUP;
+    if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 {
+        score -= hopeless_mag(s2_status_n);
     }
 
     // Speed-tier: outspeeding only matters if you can land a hit. Trick Room reverses
