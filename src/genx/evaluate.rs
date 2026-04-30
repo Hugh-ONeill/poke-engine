@@ -199,23 +199,31 @@ fn evaluate_hazards(pokemon: &Pokemon, side: &Side) -> f32 {
 const HOPELESS_MATCHUP: f32 = -50.0;
 const SPEED_TIER_BONUS: f32 = 20.0;
 
-/// How well can this pokemon hit the defender? Returns (physical_threat, special_threat)
-/// each clamped to [0.0, 1.0]. A side that can land at least one super-effective move
-/// scores 1.0; immune-only matchups score 0. type_effectiveness_modifier already handles
-/// terastallization, Levitate, etc.
-fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32) {
+/// How well can this pokemon hit the defender? Returns (physical_threat, special_threat,
+/// has_status_move). The third bool indicates whether the active has any non-attacking
+/// option — used to gate HOPELESS_MATCHUP so defensive walls (Calm Mind / Roost / hazards
+/// / cleric / phaze) aren't penalized as dead weight just because their attacks are 0x.
+/// type_effectiveness_modifier already handles terastallization, Levitate, etc.
+fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
     let mut best_phys: f32 = 0.0;
     let mut best_spec: f32 = 0.0;
+    let mut has_status = false;
     for mv in attacker.moves.into_iter() {
         if mv.id == Choices::NONE { continue; }
-        let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
         match mv.choice.category {
-            MoveCategory::Physical => best_phys = best_phys.max(eff),
-            MoveCategory::Special => best_spec = best_spec.max(eff),
+            MoveCategory::Physical => {
+                let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
+                best_phys = best_phys.max(eff);
+            }
+            MoveCategory::Special => {
+                let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
+                best_spec = best_spec.max(eff);
+            }
+            MoveCategory::Status => has_status = true,
             _ => {}
         }
     }
-    (best_phys.min(1.0), best_spec.min(1.0))
+    (best_phys.min(1.0), best_spec.min(1.0), has_status)
 }
 
 // 18 standard offensive types — used as a fixed probe set for tera defensive value.
@@ -329,14 +337,16 @@ fn evaluate_pending_effects(side: &Side) -> f32 {
     score
 }
 
-fn evaluate_weather_for_active(pokemon: &Pokemon, weather: Weather) -> f32 {
+fn evaluate_weather_for_active(pokemon: &Pokemon, weather: Weather, trick_room: bool) -> f32 {
+    // Speed-doubling weather abilities are bad under Trick Room (you wanted to be slower).
+    let speed_bonus = if trick_room { 0.0 } else { WEATHER_SPEED_ABILITY };
     let mut score = 0.0;
     match weather {
         Weather::SUN | Weather::HARSHSUN => {
             if pokemon.has_type(&PokemonType::FIRE) { score += WEATHER_TYPE_BOOSTED; }
             if pokemon.has_type(&PokemonType::WATER) { score += WEATHER_TYPE_SUPPRESSED; }
             match pokemon.ability {
-                Abilities::CHLOROPHYLL => score += WEATHER_SPEED_ABILITY,
+                Abilities::CHLOROPHYLL => score += speed_bonus,
                 Abilities::SOLARPOWER => score += WEATHER_ABILITY_MINOR,
                 Abilities::FLOWERGIFT => score += WEATHER_ABILITY_MINOR,
                 Abilities::LEAFGUARD => score += WEATHER_ABILITY_MINOR,
@@ -348,7 +358,7 @@ fn evaluate_weather_for_active(pokemon: &Pokemon, weather: Weather) -> f32 {
             if pokemon.has_type(&PokemonType::WATER) { score += WEATHER_TYPE_BOOSTED; }
             if pokemon.has_type(&PokemonType::FIRE) { score += WEATHER_TYPE_SUPPRESSED; }
             match pokemon.ability {
-                Abilities::SWIFTSWIM => score += WEATHER_SPEED_ABILITY,
+                Abilities::SWIFTSWIM => score += speed_bonus,
                 Abilities::RAINDISH => score += WEATHER_PASSIVE_HEAL,
                 Abilities::DRYSKIN => score += WEATHER_PASSIVE_HEAL,
                 Abilities::HYDRATION => score += WEATHER_ABILITY_MINOR,
@@ -365,7 +375,7 @@ fn evaluate_weather_for_active(pokemon: &Pokemon, weather: Weather) -> f32 {
                     | Abilities::SANDVEIL | Abilities::SANDFORCE | Abilities::SANDRUSH);
             if !immune_to_chip { score += WEATHER_PASSIVE_DAMAGE; }
             match pokemon.ability {
-                Abilities::SANDRUSH => score += WEATHER_SPEED_ABILITY,
+                Abilities::SANDRUSH => score += speed_bonus,
                 Abilities::SANDFORCE => score += WEATHER_ABILITY_MINOR,
                 Abilities::SANDVEIL => score += WEATHER_ABILITY_MINOR,
                 _ => {}
@@ -381,7 +391,7 @@ fn evaluate_weather_for_active(pokemon: &Pokemon, weather: Weather) -> f32 {
                 if !immune_to_chip { score += WEATHER_PASSIVE_DAMAGE; }
             }
             match pokemon.ability {
-                Abilities::SLUSHRUSH => score += WEATHER_SPEED_ABILITY,
+                Abilities::SLUSHRUSH => score += speed_bonus,
                 Abilities::ICEBODY => score += WEATHER_PASSIVE_HEAL,
                 Abilities::SNOWCLOAK => score += WEATHER_ABILITY_MINOR,
                 _ => {}
@@ -392,14 +402,15 @@ fn evaluate_weather_for_active(pokemon: &Pokemon, weather: Weather) -> f32 {
     score
 }
 
-fn evaluate_terrain_for_active(pokemon: &Pokemon, terrain: Terrain) -> f32 {
+fn evaluate_terrain_for_active(pokemon: &Pokemon, terrain: Terrain, trick_room: bool) -> f32 {
     if !pokemon.is_grounded() { return 0.0; }
+    let speed_bonus = if trick_room { 0.0 } else { WEATHER_SPEED_ABILITY };
     let mut score = 0.0;
     match terrain {
         Terrain::ELECTRICTERRAIN => {
             score += TERRAIN_ELECTRIC_SLEEP_BLOCK;
             if pokemon.has_type(&PokemonType::ELECTRIC) { score += TERRAIN_TYPE_BOOSTED; }
-            if pokemon.ability == Abilities::SURGESURFER { score += WEATHER_SPEED_ABILITY; }
+            if pokemon.ability == Abilities::SURGESURFER { score += speed_bonus; }
         }
         Terrain::GRASSYTERRAIN => {
             score += TERRAIN_GRASSY_HEAL;
@@ -456,8 +467,8 @@ pub fn evaluate(state: &State) -> f32 {
 
     let s1_active = &state.side_one.pokemon[state.side_one.active_index];
     let s2_active = &state.side_two.pokemon[state.side_two.active_index];
-    let (s1_phys, s1_spec) = threat_vs(s1_active, s2_active);
-    let (s2_phys, s2_spec) = threat_vs(s2_active, s1_active);
+    let (s1_phys, s1_spec, s1_has_status) = threat_vs(s1_active, s2_active);
+    let (s2_phys, s2_spec, s2_has_status) = threat_vs(s2_active, s1_active);
 
     let mut iter = state.side_one.pokemon.into_iter();
     let mut s1_used_tera = false;
@@ -532,15 +543,16 @@ pub fn evaluate(state: &State) -> f32 {
     score += evaluate_pending_effects(&state.side_one);
     score -= evaluate_pending_effects(&state.side_two);
 
+    let trick_room = state.trick_room.active;
     let weather = state.weather.weather_type;
     if weather != Weather::NONE {
         let s1_active = state.side_one.get_active_immutable();
         let s2_active = state.side_two.get_active_immutable();
         if s1_active.hp > 0 {
-            score += evaluate_weather_for_active(s1_active, weather);
+            score += evaluate_weather_for_active(s1_active, weather, trick_room);
         }
         if s2_active.hp > 0 {
-            score -= evaluate_weather_for_active(s2_active, weather);
+            score -= evaluate_weather_for_active(s2_active, weather, trick_room);
         }
     }
 
@@ -549,20 +561,20 @@ pub fn evaluate(state: &State) -> f32 {
         let s1_active = state.side_one.get_active_immutable();
         let s2_active = state.side_two.get_active_immutable();
         if s1_active.hp > 0 {
-            score += evaluate_terrain_for_active(s1_active, terrain);
+            score += evaluate_terrain_for_active(s1_active, terrain, trick_room);
         }
         if s2_active.hp > 0 {
-            score -= evaluate_terrain_for_active(s2_active, terrain);
+            score -= evaluate_terrain_for_active(s2_active, terrain, trick_room);
         }
     }
 
-    // Hopeless matchup: an active that can't damage the opponent at all is dead weight
-    // and forced to switch — heavy penalty. Modern engine: covers Levitate, Wonder Guard,
-    // tera-induced immunities, etc.
-    if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 {
+    // Hopeless matchup: an active that can't damage the opponent at all AND has no status
+    // moves is dead weight. Defensive walls with Roost/setup/hazards/phaze aren't hopeless —
+    // they still have work to do even when their attacks register 0x.
+    if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 && !s1_has_status {
         score += HOPELESS_MATCHUP;
     }
-    if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 {
+    if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 && !s2_has_status {
         score -= HOPELESS_MATCHUP;
     }
 
