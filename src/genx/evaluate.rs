@@ -2,7 +2,7 @@ use super::abilities::Abilities;
 use super::damage_calc::type_effectiveness_modifier;
 use super::items::Items;
 use super::state::{PokemonVolatileStatus, Terrain, Weather};
-use crate::choices::MoveCategory;
+use crate::choices::{Choices, MoveCategory};
 use crate::state::{Pokemon, PokemonStatus, PokemonType, Side, State};
 
 const POKEMON_ALIVE: f32 = 30.0;
@@ -194,6 +194,28 @@ fn evaluate_hazards(pokemon: &Pokemon, side: &Side) -> f32 {
     }
 
     score
+}
+
+const HOPELESS_MATCHUP: f32 = -50.0;
+const SPEED_TIER_BONUS: f32 = 20.0;
+
+/// How well can this pokemon hit the defender? Returns (physical_threat, special_threat)
+/// each clamped to [0.0, 1.0]. A side that can land at least one super-effective move
+/// scores 1.0; immune-only matchups score 0. type_effectiveness_modifier already handles
+/// terastallization, Levitate, etc.
+fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32) {
+    let mut best_phys: f32 = 0.0;
+    let mut best_spec: f32 = 0.0;
+    for mv in attacker.moves.into_iter() {
+        if mv.id == Choices::NONE { continue; }
+        let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
+        match mv.choice.category {
+            MoveCategory::Physical => best_phys = best_phys.max(eff),
+            MoveCategory::Special => best_spec = best_spec.max(eff),
+            _ => {}
+        }
+    }
+    (best_phys.min(1.0), best_spec.min(1.0))
 }
 
 // 18 standard offensive types — used as a fixed probe set for tera defensive value.
@@ -432,6 +454,11 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
 pub fn evaluate(state: &State) -> f32 {
     let mut score = 0.0;
 
+    let s1_active = &state.side_one.pokemon[state.side_one.active_index];
+    let s2_active = &state.side_two.pokemon[state.side_two.active_index];
+    let (s1_phys, s1_spec) = threat_vs(s1_active, s2_active);
+    let (s2_phys, s2_spec) = threat_vs(s2_active, s1_active);
+
     let mut iter = state.side_one.pokemon.into_iter();
     let mut s1_used_tera = false;
     while let Some(pkmn) = iter.next() {
@@ -442,10 +469,11 @@ pub fn evaluate(state: &State) -> f32 {
                 score += evaluate_active_volatiles(pkmn, &state.side_one);
                 score += evaluate_tera_active(pkmn);
 
-                score += get_boost_multiplier(state.side_one.attack_boost) * POKEMON_ATTACK_BOOST;
+                score += get_boost_multiplier(state.side_one.attack_boost)
+                    * POKEMON_ATTACK_BOOST * s1_phys;
                 score += get_boost_multiplier(state.side_one.defense_boost) * POKEMON_DEFENSE_BOOST;
                 score += get_boost_multiplier(state.side_one.special_attack_boost)
-                    * POKEMON_SPECIAL_ATTACK_BOOST;
+                    * POKEMON_SPECIAL_ATTACK_BOOST * s1_spec;
                 score += get_boost_multiplier(state.side_one.special_defense_boost)
                     * POKEMON_SPECIAL_DEFENSE_BOOST;
                 score += get_boost_multiplier(state.side_one.speed_boost) * POKEMON_SPEED_BOOST;
@@ -469,10 +497,11 @@ pub fn evaluate(state: &State) -> f32 {
                 score -= evaluate_active_volatiles(pkmn, &state.side_two);
                 score -= evaluate_tera_active(pkmn);
 
-                score -= get_boost_multiplier(state.side_two.attack_boost) * POKEMON_ATTACK_BOOST;
+                score -= get_boost_multiplier(state.side_two.attack_boost)
+                    * POKEMON_ATTACK_BOOST * s2_phys;
                 score -= get_boost_multiplier(state.side_two.defense_boost) * POKEMON_DEFENSE_BOOST;
                 score -= get_boost_multiplier(state.side_two.special_attack_boost)
-                    * POKEMON_SPECIAL_ATTACK_BOOST;
+                    * POKEMON_SPECIAL_ATTACK_BOOST * s2_spec;
                 score -= get_boost_multiplier(state.side_two.special_defense_boost)
                     * POKEMON_SPECIAL_DEFENSE_BOOST;
                 score -= get_boost_multiplier(state.side_two.speed_boost) * POKEMON_SPEED_BOOST;
@@ -524,6 +553,39 @@ pub fn evaluate(state: &State) -> f32 {
         }
         if s2_active.hp > 0 {
             score -= evaluate_terrain_for_active(s2_active, terrain);
+        }
+    }
+
+    // Hopeless matchup: an active that can't damage the opponent at all is dead weight
+    // and forced to switch — heavy penalty. Modern engine: covers Levitate, Wonder Guard,
+    // tera-induced immunities, etc.
+    if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 {
+        score += HOPELESS_MATCHUP;
+    }
+    if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 {
+        score -= HOPELESS_MATCHUP;
+    }
+
+    // Speed-tier: outspeeding only matters if you can land a hit. Trick Room reverses
+    // the comparison.
+    if s1_active.hp > 0 && s2_active.hp > 0 {
+        let trick_room = state.trick_room.active;
+        let s1_faster = if trick_room {
+            s1_active.speed < s2_active.speed
+        } else {
+            s1_active.speed > s2_active.speed
+        };
+        let s2_faster = if trick_room {
+            s2_active.speed < s1_active.speed
+        } else {
+            s2_active.speed > s1_active.speed
+        };
+        let s1_max = s1_phys.max(s1_spec);
+        let s2_max = s2_phys.max(s2_spec);
+        if s1_faster && s1_max > 0.0 {
+            score += SPEED_TIER_BONUS * s1_max;
+        } else if s2_faster && s2_max > 0.0 {
+            score -= SPEED_TIER_BONUS * s2_max;
         }
     }
 
