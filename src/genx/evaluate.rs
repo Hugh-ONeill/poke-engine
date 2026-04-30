@@ -101,6 +101,14 @@ const LASER_FOCUS: f32 = 8.0;
 const NIGHTMARE_VS: f32 = -15.0;  // only relevant when asleep — but ENGINE only sets it then
 const CURSE_ON_ACTIVE: f32 = -25.0;
 
+// Paradox booster (Protosynthesis/Quark Drive). Non-speed boost is 1.3x ≈ +0.6 stage,
+// speed boost is 1.5x = +1 stage. Credited at fractions of the existing stage constants.
+const PARADOX_ATK: f32 = 18.0;  // 0.6 * POKEMON_ATTACK_BOOST
+const PARADOX_DEF: f32 = 9.0;   // 0.6 * POKEMON_DEFENSE_BOOST
+const PARADOX_SPA: f32 = 18.0;  // 0.6 * POKEMON_SPECIAL_ATTACK_BOOST
+const PARADOX_SPD: f32 = 9.0;   // 0.6 * POKEMON_SPECIAL_DEFENSE_BOOST
+const PARADOX_SPE: f32 = 30.0;  // 1.0 * POKEMON_SPEED_BOOST
+
 fn evaluate_poison(pokemon: &Pokemon, base_score: f32) -> f32 {
     match pokemon.ability {
         Abilities::POISONHEAL => 15.0,
@@ -216,6 +224,16 @@ fn evaluate_active_volatiles(pokemon: &Pokemon, side: &Side) -> f32 {
             PokemonVolatileStatus::DESTINYBOND => score += DESTINY_BOND,
             PokemonVolatileStatus::FOCUSENERGY => score += FOCUS_ENERGY,
             PokemonVolatileStatus::LASERFOCUS => score += LASER_FOCUS,
+            PokemonVolatileStatus::PROTOSYNTHESISATK
+            | PokemonVolatileStatus::QUARKDRIVEATK => score += PARADOX_ATK,
+            PokemonVolatileStatus::PROTOSYNTHESISDEF
+            | PokemonVolatileStatus::QUARKDRIVEDEF => score += PARADOX_DEF,
+            PokemonVolatileStatus::PROTOSYNTHESISSPA
+            | PokemonVolatileStatus::QUARKDRIVESPA => score += PARADOX_SPA,
+            PokemonVolatileStatus::PROTOSYNTHESISSPD
+            | PokemonVolatileStatus::QUARKDRIVESPD => score += PARADOX_SPD,
+            PokemonVolatileStatus::PROTOSYNTHESISSPE
+            | PokemonVolatileStatus::QUARKDRIVESPE => score += PARADOX_SPE,
             _ => {}
         }
     }
