@@ -47,8 +47,8 @@ const SAFE_GUARD: f32 = 5.0;
 const TAILWIND: f32 = 7.0;
 const HEALING_WISH: f32 = 30.0;
 
-const STEALTH_ROCK: f32 = -10.0;
-const SPIKES: f32 = -7.0;
+const STEALTH_ROCK: f32 = -15.0;
+const SPIKES: f32 = -9.0;
 const TOXIC_SPIKES: f32 = -7.0;
 const STICKY_WEB: f32 = -25.0;
 
