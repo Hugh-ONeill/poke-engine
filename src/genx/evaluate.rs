@@ -204,26 +204,55 @@ const SPEED_TIER_BONUS: f32 = 20.0;
 /// option — used to gate HOPELESS_MATCHUP so defensive walls (Calm Mind / Roost / hazards
 /// / cleric / phaze) aren't penalized as dead weight just because their attacks are 0x.
 /// type_effectiveness_modifier already handles terastallization, Levitate, etc.
+// Practical threat: estimated fraction of defender HP per hit, scaled so a 2HKO
+// (~50% per hit) reads as 1.0. Captures stat bulk that pure type-effectiveness misses
+// — e.g. Liquidation vs full-HP Cresselia is "1.0 type-eff" but ~28% per hit, so the
+// real threat is ~0.56, not 1.0. Used to gate boost values, HOPELESS, and SPEED_TIER
+// so attackers stuck against walls don't accumulate phantom value.
 fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
     let mut best_phys: f32 = 0.0;
     let mut best_spec: f32 = 0.0;
     let mut has_status = false;
+    let def_hp = defender.maxhp.max(1) as f32;
+    let atk_stat = attacker.attack as f32;
+    let spa_stat = attacker.special_attack as f32;
+    let def_stat = defender.defense.max(1) as f32;
+    let spd_stat = defender.special_defense.max(1) as f32;
     for mv in attacker.moves.into_iter() {
         if mv.id == Choices::NONE { continue; }
+        let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
         match mv.choice.category {
-            MoveCategory::Physical => {
-                let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
-                best_phys = best_phys.max(eff);
-            }
-            MoveCategory::Special => {
-                let eff = type_effectiveness_modifier(&mv.choice.move_type, defender);
-                best_spec = best_spec.max(eff);
+            MoveCategory::Physical | MoveCategory::Special => {
+                if eff == 0.0 { continue; }
+                let bp = mv.choice.base_power;
+                if bp == 0.0 { continue; }
+                let stab = if mv.choice.move_type == attacker.types.0
+                    || mv.choice.move_type == attacker.types.1 {
+                    1.5
+                } else {
+                    1.0
+                };
+                let (off, def) = if mv.choice.category == MoveCategory::Physical {
+                    (atk_stat, def_stat)
+                } else {
+                    (spa_stat, spd_stat)
+                };
+                // Lv100 simplified damage: 0.84 * BP * (off/def) * STAB * type_eff
+                let dmg = 0.84 * bp * (off / def) * stab * eff;
+                let frac = dmg / def_hp;
+                // 2HKO (50% per hit) → 1.0 threat; OHKO+ clamps at 1.0
+                let score = (frac / 0.5).min(1.0);
+                if mv.choice.category == MoveCategory::Physical {
+                    best_phys = best_phys.max(score);
+                } else {
+                    best_spec = best_spec.max(score);
+                }
             }
             MoveCategory::Status => has_status = true,
             _ => {}
         }
     }
-    (best_phys.min(1.0), best_spec.min(1.0), has_status)
+    (best_phys, best_spec, has_status)
 }
 
 // 18 standard offensive types — used as a fixed probe set for tera defensive value.
@@ -433,6 +462,41 @@ fn evaluate_terrain_for_active(pokemon: &Pokemon, terrain: Terrain, trick_room: 
     score
 }
 
+// Per-item value. Magnitudes kept small so team-composition asymmetries don't
+// distort MCTS baselines (large per-item differences shifted the eval offset by
+// 19+ for some matchups, biasing per-side play). Relative ordering preserved
+// so Knock Off targets the right items.
+fn evaluate_item(item: Items) -> f32 {
+    match item {
+        Items::NONE => 0.0,
+        Items::CHOICEBAND
+        | Items::CHOICESPECS
+        | Items::CHOICESCARF => 13.0,
+        Items::LIFEORB => 9.0,
+        Items::HEAVYDUTYBOOTS
+        | Items::LEFTOVERS
+        | Items::BLACKSLUDGE
+        | Items::ASSAULTVEST => 9.0,
+        Items::EVIOLITE => 13.0,
+        Items::ROCKYHELMET | Items::AIRBALLOON => 7.0,
+        Items::FOCUSSASH => 8.0,
+        Items::BOOSTERENERGY => 4.0,
+        Items::SITRUSBERRY => 6.0,
+        Items::TOXICORB | Items::FLAMEORB => 4.0,
+        Items::EXPERTBELT
+        | Items::MUSCLEBAND
+        | Items::WISEGLASSES
+        | Items::PUNCHINGGLOVE => 7.0,
+        Items::LOADEDDICE => 12.0,
+        Items::COVERTCLOAK
+        | Items::CLEARAMULET
+        | Items::POWERHERB
+        | Items::WEAKNESSPOLICY
+        | Items::SHELLBELL => 6.0,
+        _ => 5.0,
+    }
+}
+
 fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
     let mut score = 0.0;
     score += POKEMON_HP * pokemon.hp as f32 / pokemon.maxhp as f32;
@@ -447,9 +511,7 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
         PokemonStatus::NONE => {}
     }
 
-    if pokemon.item != Items::NONE {
-        score += 10.0;
-    }
+    score += evaluate_item(pokemon.item);
 
     // without this a low hp pokemon could get a negative score and incentivize the other side
     // to keep it alive
@@ -594,10 +656,14 @@ pub fn evaluate(state: &State) -> f32 {
         };
         let s1_max = s1_phys.max(s1_spec);
         let s2_max = s2_phys.max(s2_spec);
+        // Speed only matters when defender is weakened — outspeeding a 100% HP
+        // tank you can't break is worthless (Barraskewda vs full-HP Cresselia).
+        let s1_def_missing = 1.0 - (s1_active.hp as f32 / s1_active.maxhp as f32);
+        let s2_def_missing = 1.0 - (s2_active.hp as f32 / s2_active.maxhp as f32);
         if s1_faster && s1_max > 0.0 {
-            score += SPEED_TIER_BONUS * s1_max;
+            score += SPEED_TIER_BONUS * s1_max * s2_def_missing;
         } else if s2_faster && s2_max > 0.0 {
-            score -= SPEED_TIER_BONUS * s2_max;
+            score -= SPEED_TIER_BONUS * s2_max * s1_def_missing;
         }
     }
 
