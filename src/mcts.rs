@@ -58,6 +58,7 @@ impl Node {
                 total_score: 0.0,
                 visits: 0,
                 prior: 1.0 / n_s1,  // uniform prior
+                pending_visits: 0,
             })
             .collect();
         let s2_options_vec: Vec<MoveNode> = s2_options
@@ -67,6 +68,7 @@ impl Node {
                 total_score: 0.0,
                 visits: 0,
                 prior: 1.0 / n_s2,  // uniform prior
+                pending_visits: 0,
             })
             .collect();
 
@@ -89,6 +91,7 @@ impl Node {
                 total_score: 0.0,
                 visits: 0,
                 prior: if i < s1_priors.len() { s1_priors[i] } else { 1.0 / s1_options.len() as f32 },
+                pending_visits: 0,
             })
             .collect();
         let n_s2 = s2_options.len() as f32;
@@ -100,6 +103,7 @@ impl Node {
                 total_score: 0.0,
                 visits: 0,
                 prior: if i < s2_priors.len() { s2_priors[i] } else { 1.0 / n_s2 },
+                pending_visits: 0,
             })
             .collect();
 
@@ -215,6 +219,64 @@ impl Node {
         (*self.parent).backpropagate(score, state);
     }
 
+    /// Like `selection` but increments `pending_visits` on each MoveNode it
+    /// selects along the descent. Used in batched MCTS so K concurrent
+    /// selections within one batch spread across different moves.
+    pub unsafe fn selection_with_vloss(&mut self, state: &mut State) -> (*mut Node, usize, usize) {
+        let return_node = self as *mut Node;
+        if self.s1_options.is_none() {
+            let (s1_options, s2_options) = state.get_all_options();
+            self.populate(s1_options, s2_options);
+        }
+
+        let use_p = self.use_priors;
+        let s1_mc_index = self.maximize_ucb_for_side(self.s1_options.as_ref().unwrap(), use_p);
+        let s2_mc_index = self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap(), use_p);
+
+        // Apply virtual loss to the selected moves at this node.
+        self.s1_options.as_mut().unwrap()[s1_mc_index].pending_visits += 1;
+        self.s2_options.as_mut().unwrap()[s2_mc_index].pending_visits += 1;
+
+        let child_vector = self.children.get_mut(&(s1_mc_index, s2_mc_index));
+        match child_vector {
+            Some(child_vector) => {
+                let child_vec_ptr = child_vector as *mut Vec<Node>;
+                let chosen_child = self.sample_node(child_vec_ptr);
+                state.apply_instructions(&(*chosen_child).instructions.instruction_list);
+                (*chosen_child).selection_with_vloss(state)
+            }
+            None => (return_node, s1_mc_index, s2_mc_index),
+        }
+    }
+
+    /// Like `backpropagate` but for batched MCTS:
+    ///  * does not reverse instructions on state (caller uses cloned states
+    ///    and discards them after backprop, so no reverse needed),
+    ///  * decrements `pending_visits` on each MoveNode it touches, undoing
+    ///    the virtual loss added by `selection_with_vloss`.
+    pub unsafe fn backpropagate_no_reverse(&mut self, score: f32) {
+        self.times_visited += 1;
+        if self.root {
+            return;
+        }
+
+        let parent_s1_movenode =
+            &mut (*self.parent).s1_options.as_mut().unwrap()[self.s1_choice as usize];
+        parent_s1_movenode.total_score += score;
+        parent_s1_movenode.visits += 1;
+        parent_s1_movenode.pending_visits =
+            parent_s1_movenode.pending_visits.saturating_sub(1);
+
+        let parent_s2_movenode =
+            &mut (*self.parent).s2_options.as_mut().unwrap()[self.s2_choice as usize];
+        parent_s2_movenode.total_score += 1.0 - score;
+        parent_s2_movenode.visits += 1;
+        parent_s2_movenode.pending_visits =
+            parent_s2_movenode.pending_visits.saturating_sub(1);
+
+        (*self.parent).backpropagate_no_reverse(score);
+    }
+
     pub fn rollout(&mut self, state: &mut State, root_eval: &f32) -> f32 {
         let battle_is_over = state.battle_is_over();
         if battle_is_over == 0.0 {
@@ -236,15 +298,21 @@ pub struct MoveNode {
     pub total_score: f32,
     pub visits: u32,
     pub prior: f32,
+    /// Virtual-loss counter: in-flight selections that picked this move but
+    /// haven't backpropped yet. Treated as 0-score visits in UCB/PUCT so
+    /// concurrent selections within one batch spread across moves.
+    pub pending_visits: u32,
 }
 
 impl MoveNode {
     pub fn ucb1(&self, parent_visits: u32) -> f32 {
-        if self.visits == 0 {
+        let eff_visits = self.visits + self.pending_visits;
+        if eff_visits == 0 {
             return f32::INFINITY;
         }
-        let score = (self.total_score / self.visits as f32)
-            + (2.0 * (parent_visits as f32).ln() / self.visits as f32).sqrt();
+        // pending visits count as 0-score: total_score / (visits + pending)
+        let score = (self.total_score / eff_visits as f32)
+            + (2.0 * (parent_visits as f32).ln() / eff_visits as f32).sqrt();
         score
     }
 
@@ -252,12 +320,14 @@ impl MoveNode {
     /// With uniform priors (all equal), this reduces to standard UCB1.
     pub fn puct(&self, parent_visits: u32) -> f32 {
         let c = 2.0;
-        let q = if self.visits == 0 {
+        let eff_visits = self.visits + self.pending_visits;
+        let q = if eff_visits == 0 {
             0.5  // optimistic init
         } else {
-            self.total_score / self.visits as f32
+            // pending acts as 0-score visits
+            self.total_score / eff_visits as f32
         };
-        q + c * self.prior * (parent_visits as f32).sqrt() / (1.0 + self.visits as f32)
+        q + c * self.prior * (parent_visits as f32).sqrt() / (1.0 + eff_visits as f32)
     }
 
     pub fn average_score(&self) -> f32 {
@@ -296,6 +366,12 @@ fn do_mcts(root_node: &mut Node, state: &mut State, root_eval: &f32) {
     unsafe { (*new_node).backpropagate(rollout_result, state) }
 }
 
+/// SCALE for converting raw engine eval to a "winning probability" baseline.
+/// Calibrated so sigmoid(eval / SCALE) over typical mid-game states has
+/// roughly the same distribution as MCTS visit-weighted V (~N(0.5, 0.17)).
+#[cfg(feature = "policy")]
+const RESIDUAL_EVAL_SCALE: f32 = 150.0;
+
 #[cfg(feature = "policy")]
 fn do_mcts_with_value_net(
     root_node: &mut Node,
@@ -303,14 +379,21 @@ fn do_mcts_with_value_net(
     value_net: &crate::policy::ValueNet,
     root_eval: &f32,
     alpha: f32,
+    residual: bool,
 ) {
     let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state) };
     new_node = unsafe { (*new_node).expand(state, s1_move, s2_move) };
-    // mix value net with engineered heuristic at non-terminal leaves.
-    // alpha=0 -> pure heuristic (matches plain MCTS), alpha=1 -> pure value net.
+    // Two leaf-eval modes:
+    //  blend:    rollout = alpha * v + (1 - alpha) * sigmoid(eval - root_eval)
+    //  residual: rollout = clamp(sigmoid(eval/SCALE) + alpha * (2v - 1), 0, 1)
+    //            (model output v ∈ [0,1] is interpreted as a centered residual)
     let battle_is_over = state.battle_is_over();
     let rollout_result = if battle_is_over == 0.0 {
-        if alpha >= 1.0 {
+        if residual {
+            let v = value_net.evaluate(state);
+            let h_abs = sigmoid(crate::engine::evaluate::evaluate(state) / RESIDUAL_EVAL_SCALE);
+            (h_abs + alpha * (2.0 * v - 1.0)).clamp(0.0, 1.0)
+        } else if alpha >= 1.0 {
             value_net.evaluate(state)
         } else if alpha <= 0.0 {
             sigmoid(crate::engine::evaluate::evaluate(state) - root_eval)
@@ -527,11 +610,118 @@ pub fn perform_mcts_multi(
     result
 }
 
+/// Batched value-net MCTS: runs K selections in lockstep (each on a cloned
+/// state, with virtual loss to push concurrent paths apart), then evaluates
+/// all K leaves in a single value-net call. Amortizes per-call NN overhead
+/// across K — biggest win on ONNX backends where session.run has ~10-20μs
+/// fixed cost per call.
+#[cfg(feature = "policy")]
+fn do_mcts_with_value_batched(
+    root_node: &mut Node,
+    root_state: &State,
+    value_net: &crate::policy::ValueNet,
+    root_eval: &f32,
+    alpha: f32,
+    residual: bool,
+    batch_size: usize,
+) {
+    struct Pending {
+        state: State,
+        leaf_ptr: *mut Node,
+        // Set only when expand() returned the parent (no child created):
+        // we must manually undo virtual loss at (parent, s1_idx, s2_idx).
+        no_child: Option<(*mut Node, usize, usize)>,
+        battle_outcome: f32,        // 0.0 if not over
+        value_idx: Option<usize>,   // index into the batch-eval result
+    }
+
+    let mut pending: Vec<Pending> = Vec::with_capacity(batch_size);
+    let mut eval_idxs: Vec<usize> = Vec::with_capacity(batch_size);
+
+    // Selection + expand for each rollout in the batch.
+    for _ in 0..batch_size {
+        let mut state_copy = root_state.clone();
+        let (parent_ptr, s1_idx, s2_idx) = unsafe {
+            root_node.selection_with_vloss(&mut state_copy)
+        };
+        let leaf_ptr = unsafe { (*parent_ptr).expand(&mut state_copy, s1_idx, s2_idx) };
+        let no_child = std::ptr::eq(leaf_ptr, parent_ptr);
+        let battle_outcome = state_copy.battle_is_over();
+        // Only call the value net when battle isn't over AND its output
+        // actually contributes (alpha > 0 or residual mode).
+        let need_eval = battle_outcome == 0.0 && (alpha > 0.0 || residual);
+        let value_idx = if need_eval {
+            eval_idxs.push(pending.len());
+            Some(eval_idxs.len() - 1)
+        } else {
+            None
+        };
+        pending.push(Pending {
+            state: state_copy,
+            leaf_ptr,
+            no_child: if no_child { Some((parent_ptr, s1_idx, s2_idx)) } else { None },
+            battle_outcome,
+            value_idx,
+        });
+    }
+
+    // Single batched value-net call covering every leaf that needs one.
+    let values: Vec<f32> = if !eval_idxs.is_empty() {
+        let states: Vec<&State> = eval_idxs.iter().map(|&i| &pending[i].state).collect();
+        value_net.evaluate_batch(&states)
+    } else {
+        Vec::new()
+    };
+
+    // Compute leaf scores + backprop each rollout.
+    for pr in pending.iter() {
+        let leaf_score: f32 = if pr.battle_outcome != 0.0 {
+            if pr.battle_outcome == -1.0 { 0.0 } else { pr.battle_outcome }
+        } else if let Some(vi) = pr.value_idx {
+            let v = values[vi];
+            if residual {
+                let h_abs = sigmoid(crate::engine::evaluate::evaluate(&pr.state) / RESIDUAL_EVAL_SCALE);
+                (h_abs + alpha * (2.0 * v - 1.0)).clamp(0.0, 1.0)
+            } else if alpha >= 1.0 {
+                v
+            } else {
+                let h = sigmoid(crate::engine::evaluate::evaluate(&pr.state) - root_eval);
+                alpha * v + (1.0 - alpha) * h
+            }
+        } else {
+            // alpha == 0 (and not residual): pure engine heuristic at leaf.
+            sigmoid(crate::engine::evaluate::evaluate(&pr.state) - root_eval)
+        };
+
+        // If expand made no new child (battle over at a non-root leaf), the
+        // virtual loss applied at (parent.s1_options[s1_idx], ...[s2_idx])
+        // is "stranded" — backprop_no_reverse only touches grandparent's
+        // options. Manually decrement here before backprop.
+        if let Some((p, s1i, s2i)) = pr.no_child {
+            unsafe {
+                let s1mn = &mut (*p).s1_options.as_mut().unwrap()[s1i];
+                s1mn.pending_visits = s1mn.pending_visits.saturating_sub(1);
+                let s2mn = &mut (*p).s2_options.as_mut().unwrap()[s2i];
+                s2mn.pending_visits = s2mn.pending_visits.saturating_sub(1);
+            }
+        }
+        unsafe { (*pr.leaf_ptr).backpropagate_no_reverse(leaf_score) };
+    }
+}
+
 /// MCTS with value network for leaf evaluation.
 /// Optionally also takes policy priors for PUCT selection.
-/// `alpha` mixes value net with the engineered heuristic at leaves:
-/// rollout = alpha * value_net + (1 - alpha) * sigmoid(eval - root_eval).
-/// alpha=1.0 -> pure value net (legacy behavior); alpha=0.0 -> plain heuristic.
+/// `alpha` mixes value net with the engineered heuristic at leaves.
+/// In *blend* mode (default):
+///   rollout = alpha * value_net + (1 - alpha) * sigmoid(eval - root_eval)
+/// In *residual* mode (set `residual=true`):
+///   rollout = clamp(sigmoid(eval/SCALE) + alpha * (2*v - 1), 0, 1)
+/// where the model's output `v ∈ [0,1]` is interpreted as a centered delta.
+///
+/// `batch_size`: when > 1, runs batched MCTS with virtual loss — K rollouts
+/// per batch, one value-net call per batch. Best speedup with heavy value
+/// nets (transformers, large MLPs); marginal for tiny material nets.
+/// When 0 or 1, falls back to sequential (one rollout per leaf eval).
 #[cfg(feature = "policy")]
 pub fn perform_mcts_with_value(
     state: &mut State,
@@ -541,6 +731,8 @@ pub fn perform_mcts_with_value(
     s2_priors: Option<&[f32]>,
     value_net: &crate::policy::ValueNet,
     alpha: f32,
+    residual: bool,
+    batch_size: usize,
     max_time: Duration,
 ) -> MctsResult {
     let mut root_node = Node::new();
@@ -561,9 +753,23 @@ pub fn perform_mcts_with_value(
 
     let root_eval = crate::engine::evaluate::evaluate(state);
     let start_time = std::time::Instant::now();
+    let use_batched = batch_size > 1;
+    let inner_loop_count = if use_batched { 1000 / batch_size.max(1) } else { 1000 };
     while start_time.elapsed() < max_time {
-        for _ in 0..1000 {
-            do_mcts_with_value_net(&mut root_node, state, value_net, &root_eval, alpha);
+        if use_batched {
+            // root_state stays immutable across the batched loop; each
+            // rollout inside clones it before mutating.
+            let root_state_ref: &State = state;
+            for _ in 0..inner_loop_count.max(1) {
+                do_mcts_with_value_batched(
+                    &mut root_node, root_state_ref, value_net,
+                    &root_eval, alpha, residual, batch_size,
+                );
+            }
+        } else {
+            for _ in 0..1000 {
+                do_mcts_with_value_net(&mut root_node, state, value_net, &root_eval, alpha, residual);
+            }
         }
         if root_node.times_visited == 10_000_000 {
             break;

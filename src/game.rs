@@ -450,6 +450,8 @@ pub fn play_game_with_policy_and_value(
             Some(&s2_priors),
             value_net,
             1.0,
+            false,  // residual mode off in legacy game runner
+            1,      // sequential mode (no batching)
             Duration::from_millis(s1_search_ms),
         );
         let s1_move = s1_result
