@@ -963,6 +963,13 @@ fn py_move_features_v3(move_id: &str) -> PyResult<Vec<f32>> {
     Ok(poke_engine::policy::extract_move_features_v3(move_id))
 }
 
+#[cfg(feature = "policy")]
+#[pyfunction(name = "extract_features_bo")]
+fn py_extract_features_bo(py_state: PyState) -> PyResult<Vec<f32>> {
+    let state: State = py_state.into();
+    Ok(poke_engine::policy::extract_features_bo(&state))
+}
+
 #[pyfunction]
 fn mcts(py_state: PyState, duration_ms: u64) -> PyResult<PyMctsResult> {
     let mut state: State = py_state.into();
@@ -1294,6 +1301,7 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(mcts_with_value, m)?)?;
         m.add_function(wrap_pyfunction!(py_extract_features_v3, m)?)?;
         m.add_function(wrap_pyfunction!(py_move_features_v3, m)?)?;
+        m.add_function(wrap_pyfunction!(py_extract_features_bo, m)?)?;
         m.add_class::<PyValueNet>()?;
     }
     m.add_function(wrap_pyfunction!(mcts_multi, m)?)?;

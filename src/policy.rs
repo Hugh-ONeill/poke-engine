@@ -1158,6 +1158,389 @@ impl MaterialNet {
     }
 }
 
+// ==================== BO-locked featurizer (184-dim) ====================
+//
+// Mirrors showdown/features_bo.py parse_state_bo. Used by value/policy nets
+// trained exclusively against the Bulky Offense team (idx 1 in SAMPLE_TEAMS_GEN9).
+// Auto-detects which side holds the BO mons (Garganacl/Darkrai/Great Tusk/
+// Hatterene/Tornadus-Therian/Dragonite) and orients encoding BO-first.
+//
+// Layout: bo_side(30) + opp_side(126) + field(18) + matchup(10) = 184.
+
+use crate::pokemon::PokemonName;
+
+const BO_LIST: [PokemonName; 6] = [
+    PokemonName::GARGANACL,
+    PokemonName::DARKRAI,
+    PokemonName::GREATTUSK,
+    PokemonName::HATTERENE,
+    PokemonName::TORNADUSTHERIAN,
+    PokemonName::DRAGONITE,
+];
+
+fn bo_canonical_slot(name: PokemonName) -> Option<usize> {
+    BO_LIST.iter().position(|&n| n == name)
+}
+
+fn is_bo_mon(name: PokemonName) -> bool {
+    bo_canonical_slot(name).is_some()
+}
+
+// 10-category opp role table — must mirror OPP_ROLES order in features_bo.py.
+const ROLE_FIRE_STEEL_WALL: usize = 0;
+const ROLE_PRIORITY_BREAKER: usize = 1;
+const ROLE_HAZARD_SETTER: usize = 4;
+const ROLE_REMOVER: usize = 5;
+const ROLE_PHYS_SWEEPER: usize = 6;
+const ROLE_SPEC_SWEEPER: usize = 7;
+const ROLE_WALLBREAKER: usize = 8;
+const ROLE_WEATHER_SETTER: usize = 3;
+const ROLE_OTHER: usize = 9;
+const N_OPP_ROLES: usize = 10;
+
+fn opp_role_of(name: PokemonName) -> usize {
+    use PokemonName as N;
+    match name {
+        // fire-steel / generic walls
+        N::HEATRAN | N::SKARMORY | N::CORVIKNIGHT | N::GHOLDENGO
+        | N::CLODSIRE | N::TOXAPEX | N::BLISSEY | N::CLEFABLE | N::DONDOZO
+            => ROLE_FIRE_STEEL_WALL,
+        // hazard setters
+        N::TINGLU | N::GLIMMORA | N::LANDORUSTHERIAN
+            => ROLE_HAZARD_SETTER,
+        // removers / spinners
+        N::IRONTREADS
+            => ROLE_REMOVER,
+        // priority / phys priority breakers
+        N::KINGAMBIT | N::MAMOSWINE | N::RILLABOOM | N::BISHARP
+            => ROLE_PRIORITY_BREAKER,
+        // weather setters
+        N::PELIPPER | N::TORKOAL | N::TYRANITAR | N::NINETALES
+            => ROLE_WEATHER_SETTER,
+        // physical sweepers
+        N::ROARINGMOON | N::DRAGONITE | N::VOLCARONA | N::BAXCALIBUR
+        | N::BARRASKEWDA | N::EXCADRILL | N::GREATTUSK
+            => ROLE_PHYS_SWEEPER,
+        // special sweepers
+        N::WALKINGWAKE | N::IRONVALIANT | N::IRONMOTH | N::RAGINGBOLT
+        | N::MANAPHY | N::ARCHALUDON
+            => ROLE_SPEC_SWEEPER,
+        // wallbreakers
+        N::DARKRAI | N::PECHARUNT | N::HOOPAUNBOUND | N::KYUREM | N::URSALUNA
+            => ROLE_WALLBREAKER,
+        _ => ROLE_OTHER,
+    }
+}
+
+fn is_fire_steel_wall(name: PokemonName) -> bool {
+    use PokemonName as N;
+    matches!(name, N::HEATRAN | N::SKARMORY | N::CORVIKNIGHT | N::GHOLDENGO)
+}
+
+fn is_strong_priority_user(name: PokemonName) -> bool {
+    use PokemonName as N;
+    matches!(name,
+        N::KINGAMBIT | N::MAMOSWINE | N::RILLABOOM | N::DRAGONITE
+        | N::BISHARP | N::RAGINGBOLT
+    )
+}
+
+fn is_trick_item_user(name: PokemonName) -> bool {
+    use PokemonName as N;
+    matches!(name,
+        N::GHOLDENGO | N::IRONBOULDER | N::HOOPAUNBOUND
+        | N::ALAKAZAM | N::GENGAR | N::LATIOS | N::LATIAS
+    )
+}
+
+// 7-slot item table for opp active. Order mirrors features_bo.ITEM_FLAGS.
+const N_ITEM_FLAGS_BO: usize = 7;
+fn item_flag_idx(item: Items) -> usize {
+    match item {
+        Items::HEAVYDUTYBOOTS => 0,
+        Items::CHOICESCARF    => 1,
+        Items::CHOICESPECS    => 2,
+        Items::CHOICEBAND     => 3,
+        Items::LIFEORB        => 4,
+        Items::BOOSTERENERGY  => 5,
+        _                     => 6,
+    }
+}
+
+// Block sizes (must match features_bo.py).
+const N_BO_SIDE: usize = 6 * 3 + 6 + 5 + 1;                  // 30
+const N_TYPES_BO: usize = 18;                                 // matches ATK_TYPES_V3
+const N_OPP_SIDE: usize = 6 * 3 + 2 * N_TYPES_BO
+    + 5 * N_OPP_ROLES + 6 + 5 + N_ITEM_FLAGS_BO + 4;          // 126
+const N_FIELD_BO: usize = 5 + 4 + 1 + 6 + 2;                  // 18
+const N_MATCHUP_BO: usize = 10;
+pub const STATE_BO_FEATURES: usize =
+    N_BO_SIDE + N_OPP_SIDE + N_FIELD_BO + N_MATCHUP_BO;       // 184
+
+fn defensive_blocks_salt_cure(t1: &PokemonType, t2: &PokemonType) -> bool {
+    matches!(t1, PokemonType::STEEL | PokemonType::GHOST)
+        || matches!(t2, PokemonType::STEEL | PokemonType::GHOST)
+}
+
+fn bo_type_index_18(t: &PokemonType) -> Option<usize> {
+    ATK_TYPES_V3.iter().position(|x| x == t)
+}
+
+fn count_bo_mons(side: &Side) -> usize {
+    (0..6).filter(|&p| is_bo_mon(side.pokemon.pkmn[p].id)).count()
+}
+
+/// Returns 0 if side_one holds the BO team, 1 if side_two does. Ties (e.g.
+/// mirror or no-match initial state) resolve to side_one.
+fn detect_bo_side(state: &State) -> usize {
+    let s1 = count_bo_mons(&state.side_one);
+    let s2 = count_bo_mons(&state.side_two);
+    if s2 > s1 { 1 } else { 0 }
+}
+
+fn encode_bo_side(side: &Side, out: &mut [f32]) {
+    // 0..18 — per-mon (hp, status_any, alive) in canonical BO order.
+    let mut tusk_alive = false;
+    let mut tusk_item = Items::NONE;
+    let mut slot_to_canon: [Option<usize>; 6] = [None; 6];
+    for slot in 0..6 {
+        let pk = &side.pokemon.pkmn[slot];
+        if let Some(canon) = bo_canonical_slot(pk.id) {
+            slot_to_canon[slot] = Some(canon);
+            let base = canon * 3;
+            out[base + 0] = pk.hp as f32 / pk.maxhp.max(1) as f32;
+            out[base + 1] = if pk.status != PokemonStatus::NONE { 1.0 } else { 0.0 };
+            out[base + 2] = if pk.hp > 0 { 1.0 } else { 0.0 };
+            if pk.id == PokemonName::GREATTUSK {
+                tusk_alive = pk.hp > 0;
+                tusk_item = pk.item;
+            }
+        }
+    }
+    // 18..24 — active idx in canonical order.
+    let active = side.active_index as usize;
+    if active < 6 {
+        if let Some(canon) = slot_to_canon[active] {
+            out[18 + canon] = 1.0;
+        }
+    }
+    // 24..29 — active boosts (atk/def/spa/spd/spe).
+    let stages = [
+        side.attack_boost, side.defense_boost,
+        side.special_attack_boost, side.special_defense_boost,
+        side.speed_boost,
+    ];
+    for (i, s) in stages.iter().enumerate() {
+        out[24 + i] = (*s as f32 / 6.0).clamp(-1.0, 1.0);
+    }
+    // 29 — Tusk Proto online (alive + Booster consumed).
+    out[29] = if tusk_alive && tusk_item != Items::BOOSTERENERGY { 1.0 } else { 0.0 };
+}
+
+fn encode_opp_side(side: &Side, out: &mut [f32]) {
+    let active = side.active_index as usize;
+    // 0..18 — per-mon hp/status/alive in slot order.
+    for slot in 0..6 {
+        let pk = &side.pokemon.pkmn[slot];
+        let base = slot * 3;
+        out[base + 0] = pk.hp as f32 / pk.maxhp.max(1) as f32;
+        out[base + 1] = if pk.status != PokemonStatus::NONE { 1.0 } else { 0.0 };
+        out[base + 2] = if pk.hp > 0 { 1.0 } else { 0.0 };
+    }
+    // 18..36 — opp active type1 one-hot (18).
+    // 36..54 — opp active type2 one-hot (18).
+    if active < 6 {
+        let pk = &side.pokemon.pkmn[active];
+        if let Some(i) = bo_type_index_18(&pk.types.0) {
+            out[18 + i] = 1.0;
+        }
+        if let Some(i) = bo_type_index_18(&pk.types.1) {
+            out[36 + i] = 1.0;
+        }
+    }
+    // 54..104 — opp bench role one-hots (5 slots × 10 roles); active excluded.
+    let mut bench_idx = 0;
+    for slot in 0..6 {
+        if slot == active { continue; }
+        if bench_idx >= 5 { break; }
+        let pk = &side.pokemon.pkmn[slot];
+        let role = opp_role_of(pk.id);
+        out[54 + bench_idx * N_OPP_ROLES + role] = 1.0;
+        bench_idx += 1;
+    }
+    // 104..110 — opp active idx one-hot.
+    if active < 6 {
+        out[104 + active] = 1.0;
+    }
+    // 110..115 — opp active boosts.
+    let stages = [
+        side.attack_boost, side.defense_boost,
+        side.special_attack_boost, side.special_defense_boost,
+        side.speed_boost,
+    ];
+    for (i, s) in stages.iter().enumerate() {
+        out[110 + i] = (*s as f32 / 6.0).clamp(-1.0, 1.0);
+    }
+    // 115..122 — opp active item flag one-hot.
+    if active < 6 {
+        let pk = &side.pokemon.pkmn[active];
+        out[115 + item_flag_idx(pk.item)] = 1.0;
+    }
+    // 122..126 — opp active move-disabled flags (4 moves).
+    if active < 6 {
+        let pk = &side.pokemon.pkmn[active];
+        out[122] = if pk.moves.m0.disabled { 1.0 } else { 0.0 };
+        out[123] = if pk.moves.m1.disabled { 1.0 } else { 0.0 };
+        out[124] = if pk.moves.m2.disabled { 1.0 } else { 0.0 };
+        out[125] = if pk.moves.m3.disabled { 1.0 } else { 0.0 };
+    }
+}
+
+fn encode_field_bo(state: &State, bo_side: &Side, opp_side: &Side, out: &mut [f32]) {
+    // 0..5 — weather (drop NONE).
+    match state.weather.weather_type {
+        Weather::SUN | Weather::HARSHSUN => out[0] = 1.0,
+        Weather::RAIN | Weather::HEAVYRAIN => out[1] = 1.0,
+        Weather::SAND => out[2] = 1.0,
+        Weather::SNOW => out[3] = 1.0,
+        Weather::HAIL => out[4] = 1.0,
+        _ => {}
+    }
+    // 5..9 — terrain (drop NONE).
+    use crate::engine::state::Terrain;
+    match state.get_terrain() {
+        Terrain::ELECTRICTERRAIN => out[5] = 1.0,
+        Terrain::GRASSYTERRAIN  => out[6] = 1.0,
+        Terrain::MISTYTERRAIN   => out[7] = 1.0,
+        Terrain::PSYCHICTERRAIN => out[8] = 1.0,
+        _ => {}
+    }
+    // 9 — trick room.
+    if state.trick_room.active { out[9] = 1.0; }
+    // 10..16 — hazards: SR, Spikes, TSpikes for each side (BO first, then opp).
+    let bo_sc = &bo_side.side_conditions;
+    out[10] = if bo_sc.stealth_rock > 0 { 1.0 } else { 0.0 };
+    out[11] = (bo_sc.spikes as f32 / 3.0).clamp(0.0, 1.0);
+    out[12] = (bo_sc.toxic_spikes as f32 / 2.0).clamp(0.0, 1.0);
+    let opp_sc = &opp_side.side_conditions;
+    out[13] = if opp_sc.stealth_rock > 0 { 1.0 } else { 0.0 };
+    out[14] = (opp_sc.spikes as f32 / 3.0).clamp(0.0, 1.0);
+    out[15] = (opp_sc.toxic_spikes as f32 / 2.0).clamp(0.0, 1.0);
+    // 16..18 — screens active per side.
+    out[16] = if bo_sc.reflect > 0 || bo_sc.light_screen > 0 || bo_sc.aurora_veil > 0
+              { 1.0 } else { 0.0 };
+    out[17] = if opp_sc.reflect > 0 || opp_sc.light_screen > 0 || opp_sc.aurora_veil > 0
+              { 1.0 } else { 0.0 };
+}
+
+fn encode_matchup_bo(bo_side: &Side, opp_side: &Side, out: &mut [f32]) {
+    let bo_active = bo_side.active_index as usize;
+    let opp_active = opp_side.active_index as usize;
+
+    // Find canonical BO slots present on the side.
+    let mut canon_slot: [Option<usize>; 6] = [None; 6];  // canon → real slot
+    for slot in 0..6 {
+        let pk = &bo_side.pokemon.pkmn[slot];
+        if let Some(canon) = bo_canonical_slot(pk.id) {
+            canon_slot[canon] = Some(slot);
+        }
+    }
+    let bo_slot = |canon: usize| canon_slot[canon];
+    let bo_pk = |canon: usize| -> Option<&Pokemon> {
+        canon_slot[canon].map(|s| &bo_side.pokemon.pkmn[s])
+    };
+
+    // 0: Dnite DD level. Only when Dnite is active; use atk_boost as DD proxy.
+    if let Some(slot) = bo_slot(5) {
+        if bo_active == slot {
+            out[0] = (bo_side.attack_boost as f32 / 6.0).clamp(0.0, 1.0);
+        }
+    }
+    // 1: Hatt active.
+    if let Some(slot) = bo_slot(3) {
+        if bo_active == slot { out[1] = 1.0; }
+    }
+    // 2: Tusk active + Proto online (item consumed).
+    if let Some(slot) = bo_slot(2) {
+        if bo_active == slot {
+            if let Some(pk) = bo_pk(2) {
+                if pk.item != Items::BOOSTERENERGY {
+                    out[2] = 1.0;
+                }
+            }
+        }
+    }
+    // 3: Garg active + Salt Cure applicable (opp not Steel/Ghost).
+    if let Some(slot) = bo_slot(0) {
+        if bo_active == slot && opp_active < 6 {
+            let opp = &opp_side.pokemon.pkmn[opp_active];
+            if !defensive_blocks_salt_cure(&opp.types.0, &opp.types.1) {
+                out[3] = 1.0;
+            }
+        }
+    }
+    // 4: Opp active outspeeds Dnite + 1 (proxy: opp_spe > dnite_spe * 1.5).
+    if let (Some(dnite), true) = (bo_pk(5), opp_active < 6) {
+        let opp = &opp_side.pokemon.pkmn[opp_active];
+        if dnite.speed > 0 && (opp.speed as f32) > (dnite.speed as f32) * 1.5 {
+            out[4] = 1.0;
+        }
+    }
+    // 5: Opp has fire-steel wall alive (hand list).
+    for slot in 0..6 {
+        let pk = &opp_side.pokemon.pkmn[slot];
+        if pk.hp > 0 && is_fire_steel_wall(pk.id) { out[5] = 1.0; break; }
+    }
+    // 6: Opp has strong priority user alive.
+    for slot in 0..6 {
+        let pk = &opp_side.pokemon.pkmn[slot];
+        if pk.hp > 0 && is_strong_priority_user(pk.id) { out[6] = 1.0; break; }
+    }
+    // 7: Opp has Rocky Helmet user alive.
+    for slot in 0..6 {
+        let pk = &opp_side.pokemon.pkmn[slot];
+        if pk.hp > 0 && pk.item == Items::ROCKYHELMET { out[7] = 1.0; break; }
+    }
+    // 8: Opp has Trick-item user alive (hand list + Choice item).
+    for slot in 0..6 {
+        let pk = &opp_side.pokemon.pkmn[slot];
+        if pk.hp > 0 && is_trick_item_user(pk.id)
+           && matches!(pk.item, Items::CHOICESCARF | Items::CHOICESPECS | Items::CHOICEBAND) {
+            out[8] = 1.0;
+            break;
+        }
+    }
+    // 9: Sum opp active positive boosts (atk/def/spa/spd/spe), capped at 1.
+    let stages = [
+        opp_side.attack_boost, opp_side.defense_boost,
+        opp_side.special_attack_boost, opp_side.special_defense_boost,
+        opp_side.speed_boost,
+    ];
+    let pos_sum: i32 = stages.iter().filter(|&&s| s > 0).map(|&s| s as i32).sum();
+    out[9] = (pos_sum as f32 / 6.0).clamp(0.0, 1.0);
+}
+
+/// Extract 184-dim BO-locked feature vector. Auto-orients BO-first regardless
+/// of p1/p2 assignment so the same value net works for either side.
+pub fn extract_features_bo(state: &State) -> Vec<f32> {
+    let mut features = vec![0.0f32; STATE_BO_FEATURES];
+    let (bo_side, opp_side) = if detect_bo_side(state) == 0 {
+        (&state.side_one, &state.side_two)
+    } else {
+        (&state.side_two, &state.side_one)
+    };
+    let mut idx = 0;
+    encode_bo_side(bo_side, &mut features[idx..idx + N_BO_SIDE]);
+    idx += N_BO_SIDE;
+    encode_opp_side(opp_side, &mut features[idx..idx + N_OPP_SIDE]);
+    idx += N_OPP_SIDE;
+    encode_field_bo(state, bo_side, opp_side, &mut features[idx..idx + N_FIELD_BO]);
+    idx += N_FIELD_BO;
+    encode_matchup_bo(bo_side, opp_side, &mut features[idx..idx + N_MATCHUP_BO]);
+    debug_assert_eq!(idx + N_MATCHUP_BO, STATE_BO_FEATURES);
+    features
+}
+
 // ==================== Value Network (dispatch wrapper) ====================
 
 enum ValueNetBackend {
@@ -1215,7 +1598,9 @@ impl ValueNet {
         match &self.backend {
             ValueNetBackend::Material(net) => net.evaluate(state),
             ValueNetBackend::Onnx { session, input_dim } => {
-                let features = if *input_dim == STATE_V3_FEATURES {
+                let features = if *input_dim == STATE_BO_FEATURES {
+                    extract_features_bo(state)
+                } else if *input_dim == STATE_V3_FEATURES {
                     extract_features_v3(state)
                 } else {
                     extract_features(state)
@@ -1267,7 +1652,9 @@ impl ValueNet {
                 // Flatten all K feature vectors into a single [K, dim] buffer.
                 let mut buf = Vec::with_capacity(k * dim);
                 for &state in states {
-                    if dim == STATE_V3_FEATURES {
+                    if dim == STATE_BO_FEATURES {
+                        buf.extend(extract_features_bo(state));
+                    } else if dim == STATE_V3_FEATURES {
                         buf.extend(extract_features_v3(state));
                     } else {
                         buf.extend(extract_features(state));
