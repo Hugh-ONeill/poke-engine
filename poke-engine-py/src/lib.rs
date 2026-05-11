@@ -857,14 +857,32 @@ struct PyMctsSideResult {
     pub move_choice: String,
     pub total_score: f32,
     pub visits: u32,
+    /// Index of this option in the 9-slot policy action space:
+    /// 0..=3 = active mon's moves, 4..=8 = the 5 non-active teammates.
+    /// Mirrors poke_engine::policy::map_priors_to_options.
+    pub policy_idx: u8,
 }
 
 impl PyMctsSideResult {
     fn from_mcts_side_result(result: MctsSideResult, side: &Side) -> Self {
+        let policy_idx = match &result.move_choice {
+            MoveChoice::Move(i) => *i as u8,
+            #[cfg(not(feature = "gen2"))]
+            MoveChoice::MoveTera(i) => *i as u8,
+            #[cfg(not(feature = "gen2"))]
+            MoveChoice::MoveMega(i) => *i as u8,
+            MoveChoice::Switch(i) => {
+                let target = *i as usize;
+                let active = side.active_index as usize;
+                (if target < active { 4 + target } else { 3 + target }) as u8
+            }
+            MoveChoice::None => 0,
+        };
         PyMctsSideResult {
             move_choice: movechoice_to_string(side, &result.move_choice),
             total_score: result.total_score,
             visits: result.visits,
+            policy_idx,
         }
     }
 }
@@ -932,6 +950,19 @@ fn py_evaluate(py_state: PyState) -> PyResult<f32> {
     Ok(evaluate(&state))
 }
 
+#[cfg(feature = "policy")]
+#[pyfunction(name = "extract_features_v3")]
+fn py_extract_features_v3(py_state: PyState) -> PyResult<Vec<f32>> {
+    let state: State = py_state.into();
+    Ok(poke_engine::policy::extract_features_v3(&state))
+}
+
+#[cfg(feature = "policy")]
+#[pyfunction(name = "move_features_v3")]
+fn py_move_features_v3(move_id: &str) -> PyResult<Vec<f32>> {
+    Ok(poke_engine::policy::extract_move_features_v3(move_id))
+}
+
 #[pyfunction]
 fn mcts(py_state: PyState, duration_ms: u64) -> PyResult<PyMctsResult> {
     let mut state: State = py_state.into();
@@ -977,6 +1008,20 @@ impl PyValueNet {
             .map(|inner| PyValueNet { inner })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))
     }
+
+    /// Run the value net on a single state and return win probability for
+    /// side_one (sigmoid output ∈ [0,1]). Used for correctness / debug.
+    fn predict(&self, py_state: PyState) -> f32 {
+        let state: State = py_state.into();
+        self.inner.evaluate(&state)
+    }
+
+    /// Returns the raw post-sigmoid vector. For Q-nets this is the 9-dim
+    /// per-action Q vector; for V-nets it's a single-element vec [V].
+    fn predict_q(&self, py_state: PyState) -> Vec<f32> {
+        let state: State = py_state.into();
+        self.inner.evaluate_vec(&state)
+    }
 }
 
 /// MCTS with value-net leaf evaluation. Optionally also takes policy priors
@@ -984,7 +1029,7 @@ impl PyValueNet {
 /// omit them for pure value-net MCTS.
 #[cfg(feature = "policy")]
 #[pyfunction]
-#[pyo3(signature = (py_state, value_net, duration_ms, s1_priors=None, s2_priors=None, alpha=1.0))]
+#[pyo3(signature = (py_state, value_net, duration_ms, s1_priors=None, s2_priors=None, alpha=1.0, residual=false, batch_size=1))]
 fn mcts_with_value(
     py_state: PyState,
     value_net: PyRef<PyValueNet>,
@@ -992,6 +1037,8 @@ fn mcts_with_value(
     s1_priors: Option<Vec<f32>>,
     s2_priors: Option<Vec<f32>>,
     alpha: f32,
+    residual: bool,
+    batch_size: usize,
 ) -> PyResult<PyMctsResult> {
     let mut state: State = py_state.into();
     let duration = Duration::from_millis(duration_ms);
@@ -1004,6 +1051,8 @@ fn mcts_with_value(
         s2_priors.as_deref(),
         &value_net.inner,
         alpha,
+        residual,
+        batch_size,
         duration,
     );
     Ok(PyMctsResult::from_mcts_result(mcts_result, &state))
@@ -1243,6 +1292,8 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "policy")]
     {
         m.add_function(wrap_pyfunction!(mcts_with_value, m)?)?;
+        m.add_function(wrap_pyfunction!(py_extract_features_v3, m)?)?;
+        m.add_function(wrap_pyfunction!(py_move_features_v3, m)?)?;
         m.add_class::<PyValueNet>()?;
     }
     m.add_function(wrap_pyfunction!(mcts_multi, m)?)?;

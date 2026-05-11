@@ -98,11 +98,14 @@ class MctsSideResult:
     :type total_score: float
     :param visits: The number of times the move was chosen
     :type visits: int
+    :param policy_idx: Index of this option in the 9-slot policy action space
+    :type policy_idx: int
     """
 
     move_choice: str
     total_score: float
     visits: int
+    policy_idx: int = 0
 
 
 @dataclass
@@ -130,6 +133,7 @@ class MctsResult:
                     move_choice=i.move_choice,
                     total_score=i.total_score,
                     visits=i.visits,
+                    policy_idx=i.policy_idx,
                 )
                 for i in rust_result.s1
             ],
@@ -138,6 +142,7 @@ class MctsResult:
                     move_choice=i.move_choice,
                     total_score=i.total_score,
                     visits=i.visits,
+                    policy_idx=i.policy_idx,
                 )
                 for i in rust_result.s2
             ],
@@ -188,6 +193,8 @@ def monte_carlo_tree_search_with_value(
     s1_priors: list = None,
     s2_priors: list = None,
     alpha: float = 1.0,
+    residual: bool = False,
+    batch_size: int = 1,
 ) -> MctsResult:
     """
     MCTS with value-net leaf evaluation (and optional PUCT priors).
@@ -198,11 +205,17 @@ def monte_carlo_tree_search_with_value(
     :param s1_priors: optional priors for side_one's moves
     :param s2_priors: optional priors for side_two's moves
     :param alpha: leaf-eval mixing weight (0=heuristic only, 1=value net only)
+    :param residual: if True, treat the value-net output as a centered residual
+        on top of sigmoid(eval/SCALE); leaf = clamp(h + alpha*(2v - 1), 0, 1)
+    :param batch_size: when >1, batched MCTS with virtual loss — K rollouts
+        per value-net call, amortizes ONNX session overhead. Marginal for
+        tiny material nets; large speedup (2-5×) for heavy nets.
     :return: the result of the search
     :rtype: MctsResult
     """
     return MctsResult._from_rust(
-        mcts_with_value(state, value_net, duration_ms, s1_priors, s2_priors, alpha)
+        mcts_with_value(state, value_net, duration_ms,
+                        s1_priors, s2_priors, alpha, residual, batch_size)
     )
 
 
