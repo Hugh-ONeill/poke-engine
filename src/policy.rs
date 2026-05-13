@@ -1598,7 +1598,8 @@ impl ValueNet {
         match &self.backend {
             ValueNetBackend::Material(net) => net.evaluate(state),
             ValueNetBackend::Onnx { session, input_dim } => {
-                let features = if *input_dim == STATE_BO_FEATURES {
+                let is_bo = *input_dim == STATE_BO_FEATURES;
+                let features = if is_bo {
                     extract_features_bo(state)
                 } else if *input_dim == STATE_V3_FEATURES {
                     extract_features_v3(state)
@@ -1614,7 +1615,11 @@ impl ValueNet {
                     .try_extract_tensor::<f32>()
                     .expect("failed to extract output tensor");
                 let logit = binding.1[0];
-                1.0 / (1.0 + (-logit).exp())
+                let v = 1.0 / (1.0 + (-logit).exp());
+                // The BO featurizer auto-orients BO-first; the trained net
+                // outputs P(BO wins). The mcts caller expects P(side_one wins).
+                // Flip when BO is on side_two so the round-trip stays consistent.
+                if is_bo && detect_bo_side(state) == 1 { 1.0 - v } else { v }
             }
         }
     }
@@ -1649,11 +1654,15 @@ impl ValueNet {
             ValueNetBackend::Onnx { session, input_dim } => {
                 let k = states.len();
                 let dim = *input_dim;
+                let is_bo = dim == STATE_BO_FEATURES;
                 // Flatten all K feature vectors into a single [K, dim] buffer.
+                // Also remember per-state BO-on-p2 flags for output flipping.
                 let mut buf = Vec::with_capacity(k * dim);
-                for &state in states {
-                    if dim == STATE_BO_FEATURES {
+                let mut flip = vec![false; k];
+                for (i, &state) in states.iter().enumerate() {
+                    if is_bo {
                         buf.extend(extract_features_bo(state));
+                        flip[i] = detect_bo_side(state) == 1;
                     } else if dim == STATE_V3_FEATURES {
                         buf.extend(extract_features_v3(state));
                     } else {
@@ -1668,9 +1677,13 @@ impl ValueNet {
                 let binding = outputs[0]
                     .try_extract_tensor::<f32>()
                     .expect("failed to extract output tensor");
-                // Output is shape [K, 1] or [K] — sigmoid each logit.
-                binding.1.iter()
-                    .map(|&logit| 1.0 / (1.0 + (-logit).exp()))
+                // Output is shape [K, 1] or [K] — sigmoid each logit, then
+                // BO-orient back to side_one perspective when needed.
+                binding.1.iter().enumerate()
+                    .map(|(i, &logit)| {
+                        let v = 1.0 / (1.0 + (-logit).exp());
+                        if flip[i] { 1.0 - v } else { v }
+                    })
                     .collect()
             }
         }
