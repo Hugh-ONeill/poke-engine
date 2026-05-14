@@ -14,6 +14,18 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-0.0125 * x).exp())
 }
 
+/// Standard logistic, no built-in scale. Used for converting net logits to
+/// probabilities in the root-relative leaf path.
+fn sigmoid_std(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// Logit of a probability, clamped away from 0/1 to keep it finite.
+fn logit_safe(p: f32) -> f32 {
+    let p = p.clamp(1e-6, 1.0 - 1e-6);
+    (p / (1.0 - p)).ln()
+}
+
 #[derive(Debug)]
 pub struct Node {
     pub root: bool,
@@ -378,15 +390,19 @@ fn do_mcts_with_value_net(
     state: &mut State,
     value_net: &crate::policy::ValueNet,
     root_eval: &f32,
+    root_v: &f32,
     alpha: f32,
     residual: bool,
 ) {
     let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state) };
     new_node = unsafe { (*new_node).expand(state, s1_move, s2_move) };
     // Two leaf-eval modes:
-    //  blend:    rollout = alpha * v + (1 - alpha) * sigmoid(eval - root_eval)
+    //  blend:    rollout = alpha * sigmoid(logit(v) - logit(root_v))
+    //                    + (1 - alpha) * sigmoid(eval - root_eval)
+    //            (root-relative — preserves search gradient at high alpha)
     //  residual: rollout = clamp(sigmoid(eval/SCALE) + alpha * (2v - 1), 0, 1)
-    //            (model output v ∈ [0,1] is interpreted as a centered residual)
+    //            (model output v ∈ [0,1] is interpreted as a centered residual;
+    //             root-absolute, kept for back-compat with existing residual nets)
     let battle_is_over = state.battle_is_over();
     let rollout_result = if battle_is_over == 0.0 {
         if residual {
@@ -394,13 +410,15 @@ fn do_mcts_with_value_net(
             let h_abs = sigmoid(crate::engine::evaluate::evaluate(state) / RESIDUAL_EVAL_SCALE);
             (h_abs + alpha * (2.0 * v - 1.0)).clamp(0.0, 1.0)
         } else if alpha >= 1.0 {
-            value_net.evaluate(state)
+            let v = value_net.evaluate(state);
+            sigmoid_std(logit_safe(v) - logit_safe(*root_v))
         } else if alpha <= 0.0 {
             sigmoid(crate::engine::evaluate::evaluate(state) - root_eval)
         } else {
             let v = value_net.evaluate(state);
+            let v_rel = sigmoid_std(logit_safe(v) - logit_safe(*root_v));
             let h = sigmoid(crate::engine::evaluate::evaluate(state) - root_eval);
-            alpha * v + (1.0 - alpha) * h
+            alpha * v_rel + (1.0 - alpha) * h
         }
     } else if battle_is_over == -1.0 {
         0.0
@@ -621,6 +639,7 @@ fn do_mcts_with_value_batched(
     root_state: &State,
     value_net: &crate::policy::ValueNet,
     root_eval: &f32,
+    root_v: &f32,
     alpha: f32,
     residual: bool,
     batch_size: usize,
@@ -683,10 +702,11 @@ fn do_mcts_with_value_batched(
                 let h_abs = sigmoid(crate::engine::evaluate::evaluate(&pr.state) / RESIDUAL_EVAL_SCALE);
                 (h_abs + alpha * (2.0 * v - 1.0)).clamp(0.0, 1.0)
             } else if alpha >= 1.0 {
-                v
+                sigmoid_std(logit_safe(v) - logit_safe(*root_v))
             } else {
+                let v_rel = sigmoid_std(logit_safe(v) - logit_safe(*root_v));
                 let h = sigmoid(crate::engine::evaluate::evaluate(&pr.state) - root_eval);
-                alpha * v + (1.0 - alpha) * h
+                alpha * v_rel + (1.0 - alpha) * h
             }
         } else {
             // alpha == 0 (and not residual): pure engine heuristic at leaf.
@@ -752,6 +772,15 @@ pub fn perform_mcts_with_value(
     root_node.root = true;
 
     let root_eval = crate::engine::evaluate::evaluate(state);
+    // Cache the net's root-state prediction. Used by the leaf formula to
+    // make v_net contributions root-relative (sigmoid(logit(v) - logit(root_v)))
+    // so high-alpha MCTS preserves the search gradient that absolute v_net(state)
+    // would flatten. Skipped when the net wouldn't contribute anyway.
+    let root_v: f32 = if alpha > 0.0 && !residual {
+        value_net.evaluate(state)
+    } else {
+        0.5
+    };
     let start_time = std::time::Instant::now();
     let use_batched = batch_size > 1;
     let inner_loop_count = if use_batched { 1000 / batch_size.max(1) } else { 1000 };
@@ -763,12 +792,13 @@ pub fn perform_mcts_with_value(
             for _ in 0..inner_loop_count.max(1) {
                 do_mcts_with_value_batched(
                     &mut root_node, root_state_ref, value_net,
-                    &root_eval, alpha, residual, batch_size,
+                    &root_eval, &root_v, alpha, residual, batch_size,
                 );
             }
         } else {
             for _ in 0..1000 {
-                do_mcts_with_value_net(&mut root_node, state, value_net, &root_eval, alpha, residual);
+                do_mcts_with_value_net(&mut root_node, state, value_net,
+                                       &root_eval, &root_v, alpha, residual);
             }
         }
         if root_node.times_visited == 10_000_000 {
