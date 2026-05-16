@@ -1268,14 +1268,14 @@ fn item_flag_idx(item: Items) -> usize {
 }
 
 // Block sizes (must match features_bo.py).
-const N_BO_SIDE: usize = 6 * 3 + 6 + 5 + 1;                  // 30
+const N_BO_SIDE: usize = 6 * 3 + 6 + 5 + 1 + 6;              // 36 (+6 tera per BO mon)
 const N_TYPES_BO: usize = 18;                                 // matches ATK_TYPES_V3
 const N_OPP_SIDE: usize = 6 * 3 + 2 * N_TYPES_BO
-    + 5 * N_OPP_ROLES + 6 + 5 + N_ITEM_FLAGS_BO + 4;          // 126
+    + 5 * N_OPP_ROLES + 6 + 5 + N_ITEM_FLAGS_BO + 4 + 6;      // 132 (+6 tera per opp slot)
 const N_FIELD_BO: usize = 5 + 4 + 1 + 6 + 2;                  // 18
 const N_MATCHUP_BO: usize = 10;
 pub const STATE_BO_FEATURES: usize =
-    N_BO_SIDE + N_OPP_SIDE + N_FIELD_BO + N_MATCHUP_BO;       // 184
+    N_BO_SIDE + N_OPP_SIDE + N_FIELD_BO + N_MATCHUP_BO;       // 196
 
 fn defensive_blocks_salt_cure(t1: &PokemonType, t2: &PokemonType) -> bool {
     matches!(t1, PokemonType::STEEL | PokemonType::GHOST)
@@ -1303,6 +1303,7 @@ fn encode_bo_side(side: &Side, out: &mut [f32]) {
     let mut tusk_alive = false;
     let mut tusk_item = Items::NONE;
     let mut slot_to_canon: [Option<usize>; 6] = [None; 6];
+    let mut teraed_canon: [bool; 6] = [false; 6];
     for slot in 0..6 {
         let pk = &side.pokemon.pkmn[slot];
         if let Some(canon) = bo_canonical_slot(pk.id) {
@@ -1314,6 +1315,9 @@ fn encode_bo_side(side: &Side, out: &mut [f32]) {
             if pk.id == PokemonName::GREATTUSK {
                 tusk_alive = pk.hp > 0;
                 tusk_item = pk.item;
+            }
+            if pk.terastallized {
+                teraed_canon[canon] = true;
             }
         }
     }
@@ -1335,6 +1339,13 @@ fn encode_bo_side(side: &Side, out: &mut [f32]) {
     }
     // 29 — Tusk Proto online (alive + Booster consumed).
     out[29] = if tusk_alive && tusk_item != Items::BOOSTERENERGY { 1.0 } else { 0.0 };
+    // 30..36 — per-BO-mon terastallized flag (canonical order). At most one
+    // fires per game; all-zero = tera unused.
+    for canon in 0..6 {
+        if teraed_canon[canon] {
+            out[30 + canon] = 1.0;
+        }
+    }
 }
 
 fn encode_opp_side(side: &Side, out: &mut [f32]) {
@@ -1393,6 +1404,13 @@ fn encode_opp_side(side: &Side, out: &mut [f32]) {
         out[123] = if pk.moves.m1.disabled { 1.0 } else { 0.0 };
         out[124] = if pk.moves.m2.disabled { 1.0 } else { 0.0 };
         out[125] = if pk.moves.m3.disabled { 1.0 } else { 0.0 };
+    }
+    // 126..132 — per-opp-slot terastallized flag (slot order). At most one
+    // fires per game; all-zero = tera unused.
+    for slot in 0..6 {
+        if side.pokemon.pkmn[slot].terastallized {
+            out[126 + slot] = 1.0;
+        }
     }
 }
 
