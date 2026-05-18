@@ -668,6 +668,41 @@ pub fn ability_before_move(
         }
         _ => {}
     }
+
+    // Attacker-side abilities that fire before the move resolves.
+    let (attacking_side, _) = state.get_both_sides(side_ref);
+    let active_pkmn = attacking_side.get_active();
+    match active_pkmn.ability {
+        Abilities::STANCECHANGE => {
+            // Aegislash: attacking moves → Blade form, King's Shield → Shield form.
+            // Triggered before the chosen move resolves so the attack uses Blade-form stats.
+            if (choice.category == MoveCategory::Physical
+                || choice.category == MoveCategory::Special)
+                && active_pkmn.id == PokemonName::AEGISLASH
+            {
+                instructions.instruction_list.push(Instruction::FormeChange(
+                    FormeChangeInstruction {
+                        side_ref: *side_ref,
+                        name_change: PokemonName::AEGISLASHBLADE as i16 - active_pkmn.id as i16,
+                    },
+                ));
+                active_pkmn.id = PokemonName::AEGISLASHBLADE;
+                active_pkmn.recalculate_stats(side_ref, instructions);
+            } else if choice.move_id == Choices::KINGSSHIELD
+                && active_pkmn.id == PokemonName::AEGISLASHBLADE
+            {
+                instructions.instruction_list.push(Instruction::FormeChange(
+                    FormeChangeInstruction {
+                        side_ref: *side_ref,
+                        name_change: PokemonName::AEGISLASH as i16 - active_pkmn.id as i16,
+                    },
+                ));
+                active_pkmn.id = PokemonName::AEGISLASH;
+                active_pkmn.recalculate_stats(side_ref, instructions);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn ability_after_damage_hit(
