@@ -18,8 +18,8 @@ use crate::instruction::{
     ChangeVolatileStatusDurationInstruction, ChangeWeather, DecrementRestTurnsInstruction,
     DecrementWishInstruction, HealInstruction, RemoveVolatileStatusInstruction,
     SetSecondMoveSwitchOutMoveInstruction, SetSleepTurnsInstruction, ToggleBatonPassingInstruction,
-    ToggleDamageDealtHitSubstituteInstruction, ToggleShedTailingInstruction,
-    ToggleTrickRoomInstruction,
+    ToggleDamageDealtHitSubstituteInstruction, ToggleGravityInstruction,
+    ToggleShedTailingInstruction, ToggleTrickRoomInstruction, ToggleWonderRoomInstruction,
 };
 use crate::instruction::{ChangeAbilityInstruction, ToggleTerastallizedInstruction};
 use crate::instruction::{DecrementFutureSightInstruction, FormeChangeInstruction};
@@ -1127,11 +1127,18 @@ fn check_move_hit_or_miss(
 
     Otherwise, update the incoming instructions' percent_hit to reflect the chance of the move hitting
     */
+    // Snapshot Gravity before taking a borrow of state via get_side; the
+    // borrow checker objects if we read state.gravity after that.
+    let gravity_active = state.gravity.active;
     let attacking_side = state.get_side(attacking_side_ref);
     let attacking_pokemon = attacking_side.get_active_immutable();
 
     let mut percent_hit =
         ((choice.accuracy / 100.0) * boosted_accuracy(attacking_side.accuracy_boost)).min(1.0);
+    // Gravity boosts accuracy by 5/3 (canonical) for all moves while active.
+    if gravity_active {
+        percent_hit = (percent_hit * 5.0 / 3.0).min(1.0);
+    }
     if Some((0, 0)) == damage {
         percent_hit = 0.0;
     }
@@ -2807,6 +2814,42 @@ fn add_end_of_turn_instructions(
                     previous_trickroom_turns_remaining: 0,
                 }));
             state.trick_room.active = false;
+        }
+    }
+
+    // Gravity decrement / dissipation
+    if state.gravity.turns_remaining > 0 && state.gravity.active {
+        incoming_instructions
+            .instruction_list
+            .push(Instruction::DecrementGravityTurnsRemaining);
+        state.gravity.turns_remaining -= 1;
+        if state.gravity.turns_remaining == 0 {
+            incoming_instructions
+                .instruction_list
+                .push(Instruction::ToggleGravity(ToggleGravityInstruction {
+                    currently_active: true,
+                    new_turns_remaining: 0,
+                    previous_turns_remaining: 0,
+                }));
+            state.gravity.active = false;
+        }
+    }
+
+    // Wonder Room decrement / dissipation
+    if state.wonder_room.turns_remaining > 0 && state.wonder_room.active {
+        incoming_instructions
+            .instruction_list
+            .push(Instruction::DecrementWonderRoomTurnsRemaining);
+        state.wonder_room.turns_remaining -= 1;
+        if state.wonder_room.turns_remaining == 0 {
+            incoming_instructions
+                .instruction_list
+                .push(Instruction::ToggleWonderRoom(ToggleWonderRoomInstruction {
+                    currently_active: true,
+                    new_turns_remaining: 0,
+                    previous_turns_remaining: 0,
+                }));
+            state.wonder_room.active = false;
         }
     }
 

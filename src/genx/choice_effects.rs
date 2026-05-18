@@ -11,7 +11,8 @@ use crate::instruction::{
     ChangeSideConditionInstruction, ChangeStatusInstruction, ChangeSubsituteHealthInstruction,
     ChangeTerrain, ChangeType, ChangeWeather, ChangeWishInstruction, DamageInstruction,
     HealInstruction, Instruction, RemoveVolatileStatusInstruction, SetFutureSightInstruction,
-    SetSleepTurnsInstruction, StateInstructions, ToggleTrickRoomInstruction,
+    SetSleepTurnsInstruction, StateInstructions, ToggleGravityInstruction,
+    ToggleTrickRoomInstruction, ToggleWonderRoomInstruction,
 };
 use crate::pokemon::PokemonName;
 use crate::state::{
@@ -1391,6 +1392,30 @@ pub fn choice_special_effect(
                     previous_trickroom_turns_remaining: state.trick_room.turns_remaining,
                 }));
             state.trick_room.active = !state.trick_room.active;
+        }
+        Choices::GRAVITY => {
+            let new_turns_remaining = if state.gravity.active { 0 } else { 5 };
+            instructions
+                .instruction_list
+                .push(Instruction::ToggleGravity(ToggleGravityInstruction {
+                    currently_active: state.gravity.active,
+                    new_turns_remaining,
+                    previous_turns_remaining: state.gravity.turns_remaining,
+                }));
+            state.gravity.active = !state.gravity.active;
+            state.gravity.turns_remaining = new_turns_remaining;
+        }
+        Choices::WONDERROOM => {
+            let new_turns_remaining = if state.wonder_room.active { 0 } else { 5 };
+            instructions
+                .instruction_list
+                .push(Instruction::ToggleWonderRoom(ToggleWonderRoomInstruction {
+                    currently_active: state.wonder_room.active,
+                    new_turns_remaining,
+                    previous_turns_remaining: state.wonder_room.turns_remaining,
+                }));
+            state.wonder_room.active = !state.wonder_room.active;
+            state.wonder_room.turns_remaining = new_turns_remaining;
         }
         Choices::SUPERFANG | Choices::NATURESMADNESS | Choices::RUINATION => {
             let target_pkmn = defending_side.get_active();

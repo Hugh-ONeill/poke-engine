@@ -2617,9 +2617,12 @@ pub fn ability_modify_attack_against(
             }
         }
         Abilities::LEVITATE => {
+            // Gravity grounds all flyers/Levitate users for its duration, so Ground
+            // moves bypass this immunity.
             if attacker_choice.move_type == PokemonType::GROUND
                 && attacker_choice.target == MoveTarget::Opponent
                 && attacker_choice.move_id != Choices::THOUSANDARROWS
+                && !state.gravity.active
             {
                 attacker_choice.base_power = 0.0;
             }

@@ -86,6 +86,10 @@ pub enum Instruction {
     DecrementPP(DecrementPPInstruction),
     ToggleTrickRoom(ToggleTrickRoomInstruction),
     DecrementTrickRoomTurnsRemaining,
+    ToggleGravity(ToggleGravityInstruction),
+    DecrementGravityTurnsRemaining,
+    ToggleWonderRoom(ToggleWonderRoomInstruction),
+    DecrementWonderRoomTurnsRemaining,
     ToggleSideOneForceSwitch,
     ToggleSideTwoForceSwitch,
     ToggleTerastallized(ToggleTerastallizedInstruction),
@@ -326,6 +330,32 @@ impl fmt::Debug for Instruction {
             Instruction::DecrementTrickRoomTurnsRemaining => {
                 write!(f, "DecrementTrickRoomTurnsRemaining")
             }
+            Instruction::ToggleGravity(i) => {
+                write!(
+                    f,
+                    "ToggleGravity: {:?},{:?} -> {:?},{:?}",
+                    i.currently_active,
+                    i.previous_turns_remaining,
+                    !i.currently_active,
+                    i.new_turns_remaining,
+                )
+            }
+            Instruction::DecrementGravityTurnsRemaining => {
+                write!(f, "DecrementGravityTurnsRemaining")
+            }
+            Instruction::ToggleWonderRoom(i) => {
+                write!(
+                    f,
+                    "ToggleWonderRoom: {:?},{:?} -> {:?},{:?}",
+                    i.currently_active,
+                    i.previous_turns_remaining,
+                    !i.currently_active,
+                    i.new_turns_remaining,
+                )
+            }
+            Instruction::DecrementWonderRoomTurnsRemaining => {
+                write!(f, "DecrementWonderRoomTurnsRemaining")
+            }
             Instruction::ToggleSideOneForceSwitch => {
                 write!(f, "ToggleSideOneForceSwitch")
             }
@@ -543,6 +573,20 @@ pub struct ToggleTrickRoomInstruction {
     pub currently_active: bool,
     pub new_trickroom_turns_remaining: i8,
     pub previous_trickroom_turns_remaining: i8,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ToggleGravityInstruction {
+    pub currently_active: bool,
+    pub new_turns_remaining: i8,
+    pub previous_turns_remaining: i8,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ToggleWonderRoomInstruction {
+    pub currently_active: bool,
+    pub new_turns_remaining: i8,
+    pub previous_turns_remaining: i8,
 }
 
 #[derive(Debug, PartialEq, Clone)]

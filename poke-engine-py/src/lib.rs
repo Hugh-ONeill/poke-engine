@@ -64,6 +64,10 @@ pub struct PyState {
     pub terrain_turns_remaining: i8,
     pub trick_room: bool,
     pub trick_room_turns_remaining: i8,
+    pub gravity: bool,
+    pub gravity_turns_remaining: i8,
+    pub wonder_room: bool,
+    pub wonder_room_turns_remaining: i8,
     pub team_preview: bool,
 }
 
@@ -78,6 +82,10 @@ impl From<State> for PyState {
             terrain_turns_remaining: other.terrain.turns_remaining,
             trick_room: other.trick_room.active,
             trick_room_turns_remaining: other.trick_room.turns_remaining,
+            gravity: other.gravity.active,
+            gravity_turns_remaining: other.gravity.turns_remaining,
+            wonder_room: other.wonder_room.active,
+            wonder_room_turns_remaining: other.wonder_room.turns_remaining,
             team_preview: other.team_preview,
         }
     }
@@ -100,6 +108,14 @@ impl Into<State> for PyState {
                 active: self.trick_room,
                 turns_remaining: self.trick_room_turns_remaining,
             },
+            gravity: poke_engine::state::StateGravity {
+                active: self.gravity,
+                turns_remaining: self.gravity_turns_remaining,
+            },
+            wonder_room: poke_engine::state::StateWonderRoom {
+                active: self.wonder_room,
+                turns_remaining: self.wonder_room_turns_remaining,
+            },
             team_preview: self.team_preview,
             use_last_used_move: false,
             use_damage_dealt: false,
@@ -121,6 +137,10 @@ impl PyState {
         terrain_turns_remaining=0,
         trick_room=false,
         trick_room_turns_remaining=0,
+        gravity=false,
+        gravity_turns_remaining=0,
+        wonder_room=false,
+        wonder_room_turns_remaining=0,
         team_preview=false,
     ))]
     fn new(
@@ -132,6 +152,10 @@ impl PyState {
         terrain_turns_remaining: i8,
         trick_room: bool,
         trick_room_turns_remaining: i8,
+        gravity: bool,
+        gravity_turns_remaining: i8,
+        wonder_room: bool,
+        wonder_room_turns_remaining: i8,
         team_preview: bool,
     ) -> Self {
         PyState {
@@ -143,6 +167,10 @@ impl PyState {
             terrain_turns_remaining,
             trick_room,
             trick_room_turns_remaining,
+            gravity,
+            gravity_turns_remaining,
+            wonder_room,
+            wonder_room_turns_remaining,
             team_preview,
         }
     }

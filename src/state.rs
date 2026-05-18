@@ -720,6 +720,42 @@ impl StateTrickRoom {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct StateGravity {
+    pub active: bool,
+    pub turns_remaining: i8,
+}
+impl StateGravity {
+    pub fn serialize(&self) -> String {
+        format!("{};{}", self.active, self.turns_remaining)
+    }
+    pub fn deserialize(serialized: &str) -> StateGravity {
+        let split: Vec<&str> = serialized.split(";").collect();
+        StateGravity {
+            active: split[0].parse::<bool>().unwrap(),
+            turns_remaining: split[1].parse::<i8>().unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct StateWonderRoom {
+    pub active: bool,
+    pub turns_remaining: i8,
+}
+impl StateWonderRoom {
+    pub fn serialize(&self) -> String {
+        format!("{};{}", self.active, self.turns_remaining)
+    }
+    pub fn deserialize(serialized: &str) -> StateWonderRoom {
+        let split: Vec<&str> = serialized.split(";").collect();
+        StateWonderRoom {
+            active: split[0].parse::<bool>().unwrap(),
+            turns_remaining: split[1].parse::<i8>().unwrap(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VolatileStatusDurations {
     pub confusion: i8,
@@ -1253,6 +1289,8 @@ pub struct State {
     pub weather: StateWeather,
     pub terrain: StateTerrain,
     pub trick_room: StateTrickRoom,
+    pub gravity: StateGravity,
+    pub wonder_room: StateWonderRoom,
     pub team_preview: bool,
     pub use_last_used_move: bool,
     pub use_damage_dealt: bool,
@@ -1271,6 +1309,14 @@ impl Default for State {
                 turns_remaining: 0,
             },
             trick_room: StateTrickRoom {
+                active: false,
+                turns_remaining: 0,
+            },
+            gravity: StateGravity {
+                active: false,
+                turns_remaining: 0,
+            },
+            wonder_room: StateWonderRoom {
                 active: false,
                 turns_remaining: 0,
             },
@@ -1849,6 +1895,20 @@ impl State {
             Instruction::DecrementTrickRoomTurnsRemaining => {
                 self.trick_room.turns_remaining -= 1;
             }
+            Instruction::ToggleGravity(instruction) => {
+                self.gravity.active = !self.gravity.active;
+                self.gravity.turns_remaining = instruction.new_turns_remaining;
+            }
+            Instruction::DecrementGravityTurnsRemaining => {
+                self.gravity.turns_remaining -= 1;
+            }
+            Instruction::ToggleWonderRoom(instruction) => {
+                self.wonder_room.active = !self.wonder_room.active;
+                self.wonder_room.turns_remaining = instruction.new_turns_remaining;
+            }
+            Instruction::DecrementWonderRoomTurnsRemaining => {
+                self.wonder_room.turns_remaining -= 1;
+            }
             Instruction::ToggleSideOneForceSwitch => self.side_one.toggle_force_switch(),
             Instruction::ToggleSideTwoForceSwitch => self.side_two.toggle_force_switch(),
             Instruction::SetSideOneMoveSecondSwitchOutMove(instruction) => {
@@ -2036,6 +2096,20 @@ impl State {
             Instruction::DecrementTrickRoomTurnsRemaining => {
                 self.trick_room.turns_remaining += 1;
             }
+            Instruction::ToggleGravity(instruction) => {
+                self.gravity.active = !self.gravity.active;
+                self.gravity.turns_remaining = instruction.previous_turns_remaining;
+            }
+            Instruction::DecrementGravityTurnsRemaining => {
+                self.gravity.turns_remaining += 1;
+            }
+            Instruction::ToggleWonderRoom(instruction) => {
+                self.wonder_room.active = !self.wonder_room.active;
+                self.wonder_room.turns_remaining = instruction.previous_turns_remaining;
+            }
+            Instruction::DecrementWonderRoomTurnsRemaining => {
+                self.wonder_room.turns_remaining += 1;
+            }
             Instruction::ToggleSideOneForceSwitch => self.side_one.toggle_force_switch(),
             Instruction::ToggleSideTwoForceSwitch => self.side_two.toggle_force_switch(),
             Instruction::SetSideOneMoveSecondSwitchOutMove(instruction) => {
@@ -2116,14 +2190,19 @@ impl State {
     }
 
     pub fn serialize(&self) -> String {
+        // Gravity + Wonder Room are appended after team_preview so older
+        // serialized states stay parseable (deserialize falls back to
+        // defaults when those segments are absent).
         format!(
-            "{}/{}/{}/{}/{}/{}",
+            "{}/{}/{}/{}/{}/{}/{}/{}",
             self.side_one.serialize(),
             self.side_two.serialize(),
             self.weather.serialize(),
             self.terrain.serialize(),
             self.trick_room.serialize(),
-            self.team_preview
+            self.team_preview,
+            self.gravity.serialize(),
+            self.wonder_room.serialize(),
         )
     }
 
@@ -2313,6 +2392,16 @@ impl State {
     /// ```
     pub fn deserialize(serialized: &str) -> State {
         let split: Vec<&str> = serialized.split("/").collect();
+        let gravity = if split.len() > 6 {
+            StateGravity::deserialize(split[6])
+        } else {
+            StateGravity { active: false, turns_remaining: 0 }
+        };
+        let wonder_room = if split.len() > 7 {
+            StateWonderRoom::deserialize(split[7])
+        } else {
+            StateWonderRoom { active: false, turns_remaining: 0 }
+        };
         let mut state = State {
             side_one: Side::deserialize(split[0]),
             side_two: Side::deserialize(split[1]),
@@ -2320,6 +2409,8 @@ impl State {
             terrain: StateTerrain::deserialize(split[3]),
             trick_room: StateTrickRoom::deserialize(split[4]),
             team_preview: split[5].parse::<bool>().unwrap(),
+            gravity,
+            wonder_room,
             use_damage_dealt: false,
             use_last_used_move: false,
         };

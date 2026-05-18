@@ -340,7 +340,7 @@ fn get_attacking_and_defending_stats(
 ) -> (i16, i16, i16, i16) {
     let mut should_calc_attacker_boost = true;
     let mut should_calc_defender_boost = true;
-    let defending_stat;
+    let mut defending_stat;
     let (
         attacking_final_stat,
         mut defending_final_stat,
@@ -471,6 +471,43 @@ fn get_attacking_and_defending_stats(
             }
         }
         _ => panic!("Can only calculate damage for physical or special moves"),
+    }
+
+    // Wonder Room: defending Def and SpD are swapped while active. We re-derive
+    // defending_final_stat (and crit_defending_stat) using the OTHER stat, which
+    // is what the damage formula should consume; defending_stat (the enum tag) is
+    // also flipped so downstream weather buffs (Snow/Sand) key off the swapped
+    // stat correctly.
+    if state.wonder_room.active {
+        if defending_stat == PokemonBoostableStat::Defense {
+            defending_stat = PokemonBoostableStat::SpecialDefense;
+            if should_calc_defender_boost {
+                defending_final_stat =
+                    defending_side.calculate_boosted_stat(PokemonBoostableStat::SpecialDefense);
+            } else {
+                defending_final_stat = defender.special_defense;
+            }
+            if defending_side.special_defense_boost <= 0 {
+                crit_defending_stat =
+                    defending_side.calculate_boosted_stat(PokemonBoostableStat::SpecialDefense);
+            } else {
+                crit_defending_stat = defender.special_defense;
+            }
+        } else {
+            defending_stat = PokemonBoostableStat::Defense;
+            if should_calc_defender_boost {
+                defending_final_stat =
+                    defending_side.calculate_boosted_stat(PokemonBoostableStat::Defense);
+            } else {
+                defending_final_stat = defender.defense;
+            }
+            if defending_side.defense_boost <= 0 {
+                crit_defending_stat =
+                    defending_side.calculate_boosted_stat(PokemonBoostableStat::Defense);
+            } else {
+                crit_defending_stat = defender.defense;
+            }
+        }
     }
 
     #[cfg(any(
