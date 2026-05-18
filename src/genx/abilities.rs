@@ -2290,6 +2290,32 @@ pub fn ability_modify_attack_against(
         return;
     }
 
+    // Magic Coat (move): one-turn volatile that reflects incoming reflectable
+    // status moves back to the caster. Mechanically identical to Magic Bounce,
+    // but triggered by the MAGICCOAT volatile rather than the ability.
+    if defending_side
+        .volatile_statuses
+        .contains(&PokemonVolatileStatus::MAGICCOAT)
+        && attacker_choice.flags.reflectable
+    {
+        attacker_choice.target = MoveTarget::User;
+        if let Some(side_condition) = &mut attacker_choice.side_condition {
+            if side_condition.target == MoveTarget::Opponent {
+                side_condition.target = MoveTarget::User;
+            }
+        }
+        if let Some(status) = &mut attacker_choice.status {
+            if status.target == MoveTarget::Opponent {
+                status.target = MoveTarget::User;
+            }
+        }
+        if let Some(volatile_status) = &mut attacker_choice.volatile_status {
+            if volatile_status.target == MoveTarget::Opponent {
+                volatile_status.target = MoveTarget::User;
+            }
+        }
+    }
+
     match target_pkmn.ability {
         Abilities::TABLETSOFRUIN => {
             if attacker_choice.category == MoveCategory::Physical {
