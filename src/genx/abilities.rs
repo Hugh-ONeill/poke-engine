@@ -1390,6 +1390,31 @@ pub fn ability_on_switch_in(
                 active_pkmn.recalculate_stats(side_ref, instructions);
             }
         }
+        Abilities::TERASHIFT => {
+            // Terapagos transforms into Terapagos-Terastal on switch-in; its
+            // ability simultaneously changes from Tera Shift to Tera Shell.
+            // Base Terapagos has BST 450; Terastal form has BST 600.
+            if active_pkmn.id == PokemonName::TERAPAGOS {
+                let active_pkmn = state.get_side(side_ref).get_active();
+                instructions.instruction_list.push(Instruction::FormeChange(
+                    FormeChangeInstruction {
+                        side_ref: *side_ref,
+                        name_change: PokemonName::TERAPAGOSTERASTAL as i16
+                            - active_pkmn.id as i16,
+                    },
+                ));
+                active_pkmn.id = PokemonName::TERAPAGOSTERASTAL;
+                instructions
+                    .instruction_list
+                    .push(Instruction::ChangeAbility(ChangeAbilityInstruction {
+                        side_ref: *side_ref,
+                        ability_change: Abilities::TERASHELL as i16
+                            - active_pkmn.ability as i16,
+                    }));
+                active_pkmn.ability = Abilities::TERASHELL;
+                active_pkmn.recalculate_stats(side_ref, instructions);
+            }
+        }
         Abilities::PROTOSYNTHESIS => {
             let sun_is_active = state.weather_is_active(&Weather::SUN);
             let attacking_side = state.get_side(side_ref);
