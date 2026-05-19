@@ -90,6 +90,7 @@ pub enum Instruction {
     DecrementGravityTurnsRemaining,
     ToggleWonderRoom(ToggleWonderRoomInstruction),
     DecrementWonderRoomTurnsRemaining,
+    ChangeMove(ChangeMoveInstruction),
     ToggleSideOneForceSwitch,
     ToggleSideTwoForceSwitch,
     ToggleTerastallized(ToggleTerastallizedInstruction),
@@ -356,6 +357,13 @@ impl fmt::Debug for Instruction {
             Instruction::DecrementWonderRoomTurnsRemaining => {
                 write!(f, "DecrementWonderRoomTurnsRemaining")
             }
+            Instruction::ChangeMove(c) => {
+                write!(
+                    f,
+                    "ChangeMove {:?}: {:?} {:?},pp={} -> {:?},pp={}",
+                    c.side_ref, c.move_index, c.previous_id, c.previous_pp, c.new_id, c.new_pp
+                )
+            }
             Instruction::ToggleSideOneForceSwitch => {
                 write!(f, "ToggleSideOneForceSwitch")
             }
@@ -580,6 +588,17 @@ pub struct ToggleGravityInstruction {
     pub currently_active: bool,
     pub new_turns_remaining: i8,
     pub previous_turns_remaining: i8,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ChangeMoveInstruction {
+    pub side_ref: SideReference,
+    pub move_index: PokemonMoveIndex,
+    pub new_id: Choices,
+    pub previous_id: Choices,
+    pub new_pp: i8,
+    pub previous_pp: i8,
+    pub previous_disabled: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]

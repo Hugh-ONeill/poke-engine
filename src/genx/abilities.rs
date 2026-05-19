@@ -5,19 +5,20 @@ use super::items::{get_choice_move_disable_instructions, Items};
 use super::state::{PokemonVolatileStatus, Terrain, Weather};
 use crate::choices::{
     Boost, Choice, Choices, Effect, Heal, MoveCategory, MoveTarget, Secondary, StatBoosts,
-    VolatileStatus,
+    VolatileStatus, MOVES,
 };
 use crate::define_enum_with_from_str;
 use crate::instruction::{
     ApplyVolatileStatusInstruction, BoostInstruction, ChangeAbilityInstruction,
-    ChangeItemInstruction, ChangeSideConditionInstruction, ChangeStatusInstruction, ChangeTerrain,
-    ChangeType, ChangeVolatileStatusDurationInstruction, ChangeWeather, DamageInstruction,
+    ChangeItemInstruction, ChangeMoveInstruction, ChangeSideConditionInstruction,
+    ChangeStatInstruction, ChangeStatusInstruction, ChangeTerrain, ChangeType,
+    ChangeVolatileStatusDurationInstruction, ChangeWeather, DamageInstruction,
     FormeChangeInstruction, HealInstruction, Instruction, StateInstructions,
 };
 use crate::pokemon::PokemonName;
 use crate::state::{
-    PokemonBoostableStat, PokemonSideCondition, PokemonStatus, PokemonType, Side, SideReference,
-    State,
+    PokemonBoostableStat, PokemonMoveIndex, PokemonSideCondition, PokemonStatus, PokemonType,
+    Side, SideReference, State,
 };
 use std::cmp;
 
@@ -1162,6 +1163,72 @@ pub fn ability_on_switch_out(
             }));
         active_pkmn.ability = active_pkmn.base_ability;
     }
+
+    // Imposter revert: a Ditto that previously transformed has a non-Ditto id
+    // but still carries base_ability=IMPOSTER. Switch-out restores it to base
+    // Ditto so that the next switch-in starts from a clean slate (and Imposter
+    // re-fires on the new opponent). Stats/types/moves are reverted via the
+    // same instruction stream so apply/undo and Python roundtrip both work.
+    //
+    // Hardcoded to Ditto's canonical base: id=DITTO, types=(NORMAL, TYPELESS),
+    // moves=[TRANSFORM,NONE,NONE,NONE]. This matches competitive Imposter sets
+    // (Ditto only ever runs Transform). Custom-move Ditto isn't preserved.
+    if active_pkmn.base_ability == Abilities::IMPOSTER
+        && active_pkmn.id != PokemonName::DITTO
+    {
+        instructions.instruction_list.push(Instruction::FormeChange(
+            FormeChangeInstruction {
+                side_ref: *side_ref,
+                name_change: PokemonName::DITTO as i16 - active_pkmn.id as i16,
+            },
+        ));
+        active_pkmn.id = PokemonName::DITTO;
+
+        let ditto_types = (PokemonType::NORMAL, PokemonType::TYPELESS);
+        if active_pkmn.types != ditto_types {
+            instructions.instruction_list.push(Instruction::ChangeType(ChangeType {
+                side_ref: *side_ref,
+                new_types: ditto_types,
+                old_types: active_pkmn.types,
+            }));
+            active_pkmn.types = ditto_types;
+        }
+
+        // Revert each move slot to TRANSFORM (slot 0) or NONE (slots 1-3).
+        let move_targets = [
+            (PokemonMoveIndex::M0, Choices::TRANSFORM, 16i8),
+            (PokemonMoveIndex::M1, Choices::NONE, 1i8),
+            (PokemonMoveIndex::M2, Choices::NONE, 1i8),
+            (PokemonMoveIndex::M3, Choices::NONE, 1i8),
+        ];
+        for (move_index, target_id, target_pp) in move_targets {
+            let cur = &active_pkmn.moves[&move_index];
+            if cur.id != target_id || cur.pp != target_pp {
+                instructions
+                    .instruction_list
+                    .push(Instruction::ChangeMove(ChangeMoveInstruction {
+                        side_ref: *side_ref,
+                        move_index,
+                        new_id: target_id,
+                        previous_id: cur.id,
+                        new_pp: target_pp,
+                        previous_pp: cur.pp,
+                        previous_disabled: cur.disabled,
+                    }));
+            }
+        }
+        // Mutate state to match the just-emitted instructions so subsequent
+        // logic in this generate_instructions pass sees the reverted Ditto.
+        for (move_index, target_id, target_pp) in move_targets {
+            let mv = &mut active_pkmn.moves[&move_index];
+            mv.id = target_id;
+            mv.pp = target_pp;
+            mv.disabled = false;
+            mv.choice = MOVES.get(&target_id).cloned().unwrap_or_default();
+        }
+        // Recalculate stats from Ditto's base. This emits ChangeAttack/etc.
+        active_pkmn.recalculate_stats(side_ref, instructions);
+    }
 }
 
 pub fn ability_end_of_turn(
@@ -1448,6 +1515,160 @@ pub fn ability_on_switch_in(
                     }));
                 active_pkmn.ability = Abilities::TERASHELL;
                 active_pkmn.recalculate_stats(side_ref, instructions);
+            }
+        }
+        Abilities::IMPOSTER => {
+            // Ditto: on switch-in, copy opp active's id, types, ability, stats,
+            // and moves (with 5 PP each). Keeps its own item/HP/status/level/
+            // tera fields.
+            //
+            // Limitation: switch-out doesn't currently revert id/types/stats/
+            // moves to Ditto's originals — only `ability` reverts (via the
+            // standard switch-out path that uses base_ability). For a transient
+            // bench like crystal-battle's that's usually fine because Ditto
+            // rarely switches back in, but it's a real correctness gap that
+            // needs original-state snapshot infrastructure to fix.
+            let opp_id = defending_pkmn.id;
+            let opp_types = defending_pkmn.types;
+            let opp_ability = defending_pkmn.ability;
+            let opp_attack = defending_pkmn.attack;
+            let opp_defense = defending_pkmn.defense;
+            let opp_special_attack = defending_pkmn.special_attack;
+            let opp_special_defense = defending_pkmn.special_defense;
+            let opp_speed = defending_pkmn.speed;
+            let opp_moves = defending_pkmn.moves.clone();
+
+            // Don't fire on empty opp slot or a transform-into-self.
+            if opp_id != PokemonName::NONE && opp_id != active_pkmn.id {
+                let active_pkmn = state.get_side(side_ref).get_active();
+
+                instructions.instruction_list.push(Instruction::FormeChange(
+                    FormeChangeInstruction {
+                        side_ref: *side_ref,
+                        name_change: opp_id as i16 - active_pkmn.id as i16,
+                    },
+                ));
+                active_pkmn.id = opp_id;
+
+                if active_pkmn.ability != opp_ability {
+                    instructions
+                        .instruction_list
+                        .push(Instruction::ChangeAbility(ChangeAbilityInstruction {
+                            side_ref: *side_ref,
+                            ability_change: opp_ability as i16 - active_pkmn.ability as i16,
+                        }));
+                    active_pkmn.ability = opp_ability;
+                }
+
+                if active_pkmn.types != opp_types {
+                    instructions.instruction_list.push(Instruction::ChangeType(ChangeType {
+                        side_ref: *side_ref,
+                        new_types: opp_types,
+                        old_types: active_pkmn.types,
+                    }));
+                    active_pkmn.types = opp_types;
+                }
+
+                // Stat copies: emit per-stat Change* instructions for MCTS undo.
+                let atk_diff = opp_attack - active_pkmn.attack;
+                if atk_diff != 0 {
+                    instructions
+                        .instruction_list
+                        .push(Instruction::ChangeAttack(ChangeStatInstruction {
+                            side_ref: *side_ref,
+                            amount: atk_diff,
+                        }));
+                    active_pkmn.attack = opp_attack;
+                }
+                let def_diff = opp_defense - active_pkmn.defense;
+                if def_diff != 0 {
+                    instructions
+                        .instruction_list
+                        .push(Instruction::ChangeDefense(ChangeStatInstruction {
+                            side_ref: *side_ref,
+                            amount: def_diff,
+                        }));
+                    active_pkmn.defense = opp_defense;
+                }
+                let spa_diff = opp_special_attack - active_pkmn.special_attack;
+                if spa_diff != 0 {
+                    instructions.instruction_list.push(Instruction::ChangeSpecialAttack(
+                        ChangeStatInstruction {
+                            side_ref: *side_ref,
+                            amount: spa_diff,
+                        },
+                    ));
+                    active_pkmn.special_attack = opp_special_attack;
+                }
+                let spd_diff = opp_special_defense - active_pkmn.special_defense;
+                if spd_diff != 0 {
+                    instructions.instruction_list.push(Instruction::ChangeSpecialDefense(
+                        ChangeStatInstruction {
+                            side_ref: *side_ref,
+                            amount: spd_diff,
+                        },
+                    ));
+                    active_pkmn.special_defense = opp_special_defense;
+                }
+                let spe_diff = opp_speed - active_pkmn.speed;
+                if spe_diff != 0 {
+                    instructions
+                        .instruction_list
+                        .push(Instruction::ChangeSpeed(ChangeStatInstruction {
+                            side_ref: *side_ref,
+                            amount: spe_diff,
+                        }));
+                    active_pkmn.speed = opp_speed;
+                }
+
+                // Move copies: emit ChangeMove per slot so apply/undo + the
+                // Python state-roundtrip both replay correctly. Each copied
+                // move starts with 5 PP regardless of its true max-PP.
+                for (move_index, src_move, dst_move) in [
+                    (PokemonMoveIndex::M0, &opp_moves.m0, &active_pkmn.moves.m0),
+                    (PokemonMoveIndex::M1, &opp_moves.m1, &active_pkmn.moves.m1),
+                    (PokemonMoveIndex::M2, &opp_moves.m2, &active_pkmn.moves.m2),
+                    (PokemonMoveIndex::M3, &opp_moves.m3, &active_pkmn.moves.m3),
+                ] {
+                    let previous_id = dst_move.id;
+                    let previous_pp = dst_move.pp;
+                    let previous_disabled = dst_move.disabled;
+                    if previous_id != src_move.id || previous_pp != 5 {
+                        instructions.instruction_list.push(Instruction::ChangeMove(
+                            ChangeMoveInstruction {
+                                side_ref: *side_ref,
+                                move_index,
+                                new_id: src_move.id,
+                                previous_id,
+                                new_pp: 5,
+                                previous_pp,
+                                previous_disabled,
+                            },
+                        ));
+                    }
+                }
+                // Now mutate the live state to reflect the move changes so the
+                // current generate_instructions pass sees the transformed moves.
+                let m0_choice = MOVES.get(&opp_moves.m0.id).cloned().unwrap_or_default();
+                let m1_choice = MOVES.get(&opp_moves.m1.id).cloned().unwrap_or_default();
+                let m2_choice = MOVES.get(&opp_moves.m2.id).cloned().unwrap_or_default();
+                let m3_choice = MOVES.get(&opp_moves.m3.id).cloned().unwrap_or_default();
+                active_pkmn.moves.m0.id = opp_moves.m0.id;
+                active_pkmn.moves.m0.pp = 5;
+                active_pkmn.moves.m0.disabled = false;
+                active_pkmn.moves.m0.choice = m0_choice;
+                active_pkmn.moves.m1.id = opp_moves.m1.id;
+                active_pkmn.moves.m1.pp = 5;
+                active_pkmn.moves.m1.disabled = false;
+                active_pkmn.moves.m1.choice = m1_choice;
+                active_pkmn.moves.m2.id = opp_moves.m2.id;
+                active_pkmn.moves.m2.pp = 5;
+                active_pkmn.moves.m2.disabled = false;
+                active_pkmn.moves.m2.choice = m2_choice;
+                active_pkmn.moves.m3.id = opp_moves.m3.id;
+                active_pkmn.moves.m3.pp = 5;
+                active_pkmn.moves.m3.disabled = false;
+                active_pkmn.moves.m3.choice = m3_choice;
             }
         }
         Abilities::PROTOSYNTHESIS => {

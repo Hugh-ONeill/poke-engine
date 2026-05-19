@@ -1909,6 +1909,19 @@ impl State {
             Instruction::DecrementWonderRoomTurnsRemaining => {
                 self.wonder_room.turns_remaining -= 1;
             }
+            Instruction::ChangeMove(instruction) => {
+                let mv = &mut self
+                    .get_side(&instruction.side_ref)
+                    .get_active()
+                    .moves[&instruction.move_index];
+                mv.id = instruction.new_id;
+                mv.pp = instruction.new_pp;
+                mv.disabled = false;
+                mv.choice = crate::choices::MOVES
+                    .get(&instruction.new_id)
+                    .cloned()
+                    .unwrap_or_default();
+            }
             Instruction::ToggleSideOneForceSwitch => self.side_one.toggle_force_switch(),
             Instruction::ToggleSideTwoForceSwitch => self.side_two.toggle_force_switch(),
             Instruction::SetSideOneMoveSecondSwitchOutMove(instruction) => {
@@ -2109,6 +2122,19 @@ impl State {
             }
             Instruction::DecrementWonderRoomTurnsRemaining => {
                 self.wonder_room.turns_remaining += 1;
+            }
+            Instruction::ChangeMove(instruction) => {
+                let mv = &mut self
+                    .get_side(&instruction.side_ref)
+                    .get_active()
+                    .moves[&instruction.move_index];
+                mv.id = instruction.previous_id;
+                mv.pp = instruction.previous_pp;
+                mv.disabled = instruction.previous_disabled;
+                mv.choice = crate::choices::MOVES
+                    .get(&instruction.previous_id)
+                    .cloned()
+                    .unwrap_or_default();
             }
             Instruction::ToggleSideOneForceSwitch => self.side_one.toggle_force_switch(),
             Instruction::ToggleSideTwoForceSwitch => self.side_two.toggle_force_switch(),

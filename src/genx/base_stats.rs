@@ -30,6 +30,7 @@ impl PokemonName {
             PokemonName::TERAPAGOSSTELLAR => (160, 105, 110, 130, 110, 85),
             PokemonName::AEGISLASH => (60, 50, 150, 50, 150, 60),
             PokemonName::AEGISLASHBLADE => (60, 150, 50, 150, 50, 60),
+            PokemonName::DITTO => (48, 48, 48, 48, 48, 48),
 
             // megas
             PokemonName::VENUSAURMEGA => (80, 100, 123, 122, 120, 80),
