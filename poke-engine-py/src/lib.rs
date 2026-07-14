@@ -999,11 +999,15 @@ fn py_extract_features_bo(py_state: PyState) -> PyResult<Vec<f32>> {
 }
 
 #[pyfunction]
-fn mcts(py_state: PyState, duration_ms: u64) -> PyResult<PyMctsResult> {
+fn mcts(py: Python<'_>, py_state: PyState, duration_ms: u64) -> PyResult<PyMctsResult> {
     let mut state: State = py_state.into();
     let duration = Duration::from_millis(duration_ms);
     let (s1_options, s2_options) = state.root_get_all_options();
-    let mcts_result = perform_mcts(&mut state, s1_options, s2_options, duration);
+    // release the GIL during the search so callers can run several sampled
+    // worlds concurrently on separate cores (a Python thread pool per turn).
+    // MctsResult / State / MoveChoice are pure Rust (Ungil); nothing Python
+    // is touched inside the closure.
+    let mcts_result = py.detach(|| perform_mcts(&mut state, s1_options, s2_options, duration));
 
     let py_mcts_result = PyMctsResult::from_mcts_result(mcts_result, &state);
     Ok(py_mcts_result)
