@@ -822,3 +822,356 @@ pub fn perform_mcts_with_value(
         iteration_count: root_node.times_visited,
     }
 }
+
+// ===================== Persistent search / tree reuse =====================
+//
+// Every existing entry point rebuilds the tree from scratch each turn. In the
+// late-game grind that throws away millions of visits whose subtree we are
+// about to walk straight into. `PersistentMcts` keeps the tree alive across
+// turns: after both players' choices resolve, `advance` descends into the
+// child matching (our move x their move x observed chance outcome) and
+// promotes that subtree to be the new root, so depth compounds across turns
+// instead of resetting.
+//
+// Correctness boundaries (each one bails to a fresh tree, never guesses):
+//  * the played move pair must exist in the root's cached option lists
+//    (the opponent using a move outside our belief = stale belief = bail);
+//  * the promoted node's cached option lists must exactly equal
+//    `root_get_all_options` on the authoritative observed state (catches
+//    choice locks, reveals, trapping, forced switches the tree mis-modeled);
+//  * the best chance-outcome candidate must clear a similarity threshold
+//    against the observed state (HP, status, boosts, hazards, field).
+//
+// The observed (translator-authoritative) state REPLACES the tree's implied
+// state as the new root state. Cached instructions in the reused subtree were
+// generated from the old lineage, so their deltas can be slightly off for the
+// new root — but apply/reverse are exact algebraic inverses (no clamping), so
+// the root state always restores exactly after every rollout; errors stay
+// local to individual simulations and are bounded by the match threshold.
+//
+// Known fidelity notes (accepted for v1):
+//  * retained Q-values were normalized against the PREVIOUS turn's root eval;
+//    the recentering shift is common to every retained move, so relative
+//    ordering at the root is preserved;
+//  * chance children created at depth >= 2 were expanded without
+//    branch-on-damage, so the reused root keeps coarser outcome branching
+//    for already-expanded pairs (fresh pairs branch finely as usual).
+
+/// Number of visits retained across an `advance`, plus why reuse failed when
+/// it did. `retained == 0` means the search starts from a fresh tree.
+#[derive(Debug, Clone)]
+pub struct AdvanceReport {
+    pub reused: bool,
+    pub retained_visits: u32,
+    pub match_score: f32,
+    pub reason: &'static str,
+}
+
+pub struct PersistentMcts {
+    root: Box<Node>,
+    state: State,
+    root_eval: f32,
+    pub last_advance: Option<AdvanceReport>,
+}
+
+// SAFETY: the raw pointers inside `Node` are parent links that only ever
+// point within this tree, which is exclusively owned by this struct and only
+// mutated through `&mut self`. Moving the struct between threads is safe
+// because the tree's nodes live in stable heap allocations (Box root, Vec
+// children) that do not move with the struct.
+unsafe impl Send for PersistentMcts {}
+// SAFETY: no interior mutability; `&PersistentMcts` only permits reads.
+unsafe impl Sync for PersistentMcts {}
+
+/// Similarity in [0, 1] between a simulated post-transition state and the
+/// authoritative observed state. Discriminates between chance siblings of the
+/// same move pair (damage rolls, crits, status procs) and detects gross
+/// belief drift. Deliberately ignores low-signal fields the translator does
+/// not track faithfully (fine-grained volatiles, PP).
+pub fn state_match_score(a: &State, b: &State) -> f32 {
+    let mut penalty = 0.0f32;
+
+    let mut side_penalty = |a: &crate::state::Side, b: &crate::state::Side| {
+        let mut pen = 0.0f32;
+        if a.active_index != b.active_index {
+            pen += 0.5;
+        }
+        for idx in crate::state::pokemon_index_iter() {
+            let pa = &a.pokemon[idx];
+            let pb = &b.pokemon[idx];
+            if (pa.hp <= 0) != (pb.hp <= 0) {
+                pen += 0.4;
+            }
+            if pa.maxhp > 0 && pb.maxhp > 0 {
+                let fa = pa.hp.max(0) as f32 / pa.maxhp as f32;
+                let fb = pb.hp.max(0) as f32 / pb.maxhp as f32;
+                pen += 0.6 * (fa - fb).abs();
+            }
+            if pa.status != pb.status {
+                pen += 0.25;
+            }
+        }
+        let boost_diff = (a.attack_boost - b.attack_boost).abs()
+            + (a.defense_boost - b.defense_boost).abs()
+            + (a.special_attack_boost - b.special_attack_boost).abs()
+            + (a.special_defense_boost - b.special_defense_boost).abs()
+            + (a.speed_boost - b.speed_boost).abs();
+        pen += 0.05 * boost_diff as f32;
+        let sc_a = &a.side_conditions;
+        let sc_b = &b.side_conditions;
+        let cond_diff = (sc_a.stealth_rock - sc_b.stealth_rock).abs()
+            + (sc_a.spikes - sc_b.spikes).abs()
+            + (sc_a.toxic_spikes - sc_b.toxic_spikes).abs()
+            + (sc_a.sticky_web - sc_b.sticky_web).abs()
+            + (sc_a.reflect - sc_b.reflect).abs()
+            + (sc_a.light_screen - sc_b.light_screen).abs()
+            + (sc_a.aurora_veil - sc_b.aurora_veil).abs()
+            + (sc_a.tailwind - sc_b.tailwind).abs();
+        pen += 0.1 * cond_diff as f32;
+        if (a.substitute_health > 0) != (b.substitute_health > 0) {
+            pen += 0.15;
+        }
+        pen
+    };
+
+    penalty += side_penalty(&a.side_one, &b.side_one);
+    penalty += side_penalty(&a.side_two, &b.side_two);
+
+    if a.weather.weather_type != b.weather.weather_type {
+        penalty += 0.2;
+    }
+    if a.terrain.terrain_type != b.terrain.terrain_type {
+        penalty += 0.15;
+    }
+    if a.trick_room.active != b.trick_room.active {
+        penalty += 0.15;
+    }
+
+    (1.0 - penalty).max(0.0)
+}
+
+impl PersistentMcts {
+    pub fn new(state: State) -> Self {
+        let root_eval = evaluate(&state);
+        let mut root = Box::new(Node::new());
+        let (s1_options, s2_options) = state.root_get_all_options();
+        unsafe {
+            root.populate(s1_options, s2_options);
+        }
+        root.root = true;
+        PersistentMcts {
+            root,
+            state,
+            root_eval,
+            last_advance: None,
+        }
+    }
+
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    pub fn root_visits(&self) -> u32 {
+        self.root.times_visited
+    }
+
+    pub fn root_move_choices(&self) -> (Vec<MoveChoice>, Vec<MoveChoice>) {
+        (
+            self.root
+                .s1_options
+                .as_ref()
+                .map(|v| v.iter().map(|m| m.move_choice.clone()).collect())
+                .unwrap_or_default(),
+            self.root
+                .s2_options
+                .as_ref()
+                .map(|v| v.iter().map(|m| m.move_choice.clone()).collect())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Overwrite root priors (aligned to `root_move_choices` order) and turn
+    /// on PUCT selection at the root. Call after `new`/`advance`/`reset` —
+    /// a promoted subtree root carries uniform priors from its deep populate.
+    pub fn set_priors(&mut self, s1_priors: Option<&[f32]>, s2_priors: Option<&[f32]>) {
+        if let (Some(opts), Some(p)) = (self.root.s1_options.as_mut(), s1_priors) {
+            for (i, mn) in opts.iter_mut().enumerate() {
+                if i < p.len() {
+                    mn.prior = p[i];
+                }
+            }
+        }
+        if let (Some(opts), Some(p)) = (self.root.s2_options.as_mut(), s2_priors) {
+            for (i, mn) in opts.iter_mut().enumerate() {
+                if i < p.len() {
+                    mn.prior = p[i];
+                }
+            }
+        }
+        self.root.use_priors = true;
+    }
+
+    /// Throw the tree away and start fresh from `state`.
+    pub fn reset(&mut self, state: State) {
+        *self = PersistentMcts {
+            last_advance: self.last_advance.take(),
+            ..PersistentMcts::new(state)
+        };
+    }
+
+    /// Search for `max_time` more, accumulating into the persistent tree.
+    /// Visit counts in the result are cumulative across calls and advances.
+    pub fn search(&mut self, max_time: Duration) -> MctsResult {
+        let root_eval = self.root_eval;
+        let start_time = std::time::Instant::now();
+        while start_time.elapsed() < max_time {
+            for _ in 0..1000 {
+                do_mcts(&mut self.root, &mut self.state, &root_eval);
+            }
+            // >= not ==: a reused tree can arrive at the cap mid-batch.
+            if self.root.times_visited >= 10_000_000 {
+                break;
+            }
+        }
+
+        MctsResult {
+            s1: self
+                .root
+                .s1_options
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|v| MctsSideResult {
+                    move_choice: v.move_choice.clone(),
+                    total_score: v.total_score,
+                    visits: v.visits,
+                })
+                .collect(),
+            s2: self
+                .root
+                .s2_options
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|v| MctsSideResult {
+                    move_choice: v.move_choice.clone(),
+                    total_score: v.total_score,
+                    visits: v.visits,
+                })
+                .collect(),
+            iteration_count: self.root.times_visited,
+        }
+    }
+
+    fn bail(&mut self, observed: State, score: f32, reason: &'static str) -> AdvanceReport {
+        self.reset(observed);
+        let report = AdvanceReport {
+            reused: false,
+            retained_visits: 0,
+            match_score: score,
+            reason,
+        };
+        self.last_advance = Some(report.clone());
+        report
+    }
+
+    /// Advance the tree through the transition that actually happened:
+    /// `s1_move`/`s2_move` are the choices both sides made at this decision
+    /// point, `observed` is the authoritative next state (from the battle
+    /// protocol). On success the matching subtree becomes the new root and
+    /// its visits are retained; on any mismatch the tree resets to `observed`.
+    /// Call once per engine decision point (forced switches included).
+    pub fn advance(
+        &mut self,
+        s1_move: &MoveChoice,
+        s2_move: &MoveChoice,
+        observed: State,
+        min_match: f32,
+    ) -> AdvanceReport {
+        let (s1_idx, s2_idx) = {
+            let s1_opts = match self.root.s1_options.as_ref() {
+                Some(v) => v,
+                None => return self.bail(observed, 0.0, "root unpopulated"),
+            };
+            let s2_opts = self.root.s2_options.as_ref().unwrap();
+            let s1_idx = s1_opts.iter().position(|m| &m.move_choice == s1_move);
+            let s2_idx = s2_opts.iter().position(|m| &m.move_choice == s2_move);
+            match (s1_idx, s2_idx) {
+                (Some(a), Some(b)) => (a, b),
+                _ => return self.bail(observed, 0.0, "move pair not in root options"),
+            }
+        };
+
+        let mut child_vec = match self.root.children.remove(&(s1_idx, s2_idx)) {
+            Some(v) => v,
+            None => return self.bail(observed, 0.0, "pair never expanded"),
+        };
+
+        // Score every chance-outcome sibling of the played pair against the
+        // observed state; the instructions replay the engine's hypothesis of
+        // that outcome on top of the previous root state.
+        let mut best_idx = 0;
+        let mut best_score = f32::MIN;
+        for (i, cand) in child_vec.iter().enumerate() {
+            let mut sim = self.state.clone();
+            sim.apply_instructions(&cand.instructions.instruction_list);
+            let score = state_match_score(&sim, &observed);
+            if score > best_score {
+                best_score = score;
+                best_idx = i;
+            }
+        }
+        if best_score < min_match {
+            return self.bail(observed, best_score, "no chance outcome matched");
+        }
+
+        let mut new_root = child_vec.swap_remove(best_idx);
+
+        // An unvisited child has no populated options and no stats: promoting
+        // it is identical to a fresh tree, and a fresh tree populates from
+        // root_get_all_options (correct root semantics), so prefer that.
+        let (obs_s1, obs_s2) = observed.root_get_all_options();
+        let options_match = match (&new_root.s1_options, &new_root.s2_options) {
+            (Some(a), Some(b)) => {
+                a.len() == obs_s1.len()
+                    && b.len() == obs_s2.len()
+                    && a.iter().zip(obs_s1.iter()).all(|(mn, mc)| &mn.move_choice == mc)
+                    && b.iter().zip(obs_s2.iter()).all(|(mn, mc)| &mn.move_choice == mc)
+            }
+            _ => false,
+        };
+        if !options_match {
+            return self.bail(observed, best_score, "cached options != authoritative options");
+        }
+
+        new_root.root = true;
+        new_root.parent = std::ptr::null_mut();
+        new_root.instructions = StateInstructions::default();
+        new_root.s1_choice = 0;
+        new_root.s2_choice = 0;
+        let retained = new_root.times_visited;
+
+        // Pin the promoted node, then repair the ONE level of parent pointers
+        // that the move invalidated: direct children pointed at the node's
+        // old address inside the extracted Vec. Grandchildren point into the
+        // children Vecs' heap buffers, which did not move.
+        self.root = Box::new(new_root);
+        let root_ptr: *mut Node = &mut *self.root;
+        for vec in self.root.children.values_mut() {
+            for child in vec.iter_mut() {
+                child.parent = root_ptr;
+            }
+        }
+
+        self.state = observed;
+        self.root_eval = evaluate(&self.state);
+        let report = AdvanceReport {
+            reused: true,
+            retained_visits: retained,
+            match_score: best_score,
+            reason: "reused",
+        };
+        self.last_advance = Some(report.clone());
+        report
+    }
+}
