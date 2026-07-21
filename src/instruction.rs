@@ -633,10 +633,12 @@ pub struct ChangeAbilityInstruction {
 mod test {
     use super::Instruction;
 
-    // Make sure that the size of the Instruction enum doesn't change
+    // Make sure that the size of the Instruction enum doesn't change.
+    // Upstream pins 6 bytes; this fork's added mechanics carry larger
+    // payloads and sit at 10. The guard still catches UNINTENTIONAL growth.
     #[test]
     fn test_instruction_size() {
-        assert_eq!(size_of::<Instruction>(), 6);
+        assert_eq!(size_of::<Instruction>(), 10);
         assert_eq!(align_of::<Instruction>(), 2);
     }
 }

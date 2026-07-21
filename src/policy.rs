@@ -1742,7 +1742,7 @@ mod tests {
     #[test]
     fn test_softmax() {
         let logits = vec![1.0, 2.0, 3.0];
-        let probs = softmax(&logits);
+        let probs = softmax_with_temp(&logits, 1.0);
         let sum: f32 = probs.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5);
         assert!(probs[2] > probs[1]);
