@@ -1015,6 +1015,7 @@ fn mcts(py: Python<'_>, py_state: PyState, duration_ms: u64) -> PyResult<PyMctsR
 
 #[pyfunction]
 fn mcts_with_priors(
+    py: Python<'_>,
     py_state: PyState,
     s1_priors: Vec<f32>,
     s2_priors: Vec<f32>,
@@ -1023,9 +1024,15 @@ fn mcts_with_priors(
     let mut state: State = py_state.into();
     let duration = Duration::from_millis(duration_ms);
     let (s1_options, s2_options) = state.root_get_all_options();
-    let mcts_result = perform_mcts_with_priors(
-        &mut state, s1_options, s2_options, &s1_priors, &s2_priors, duration,
-    );
+    // Release the GIL for the search, exactly as `mcts` does. Without this a
+    // multi-second priors search blocks the asyncio event loop, the websocket
+    // cannot answer keepalive pings, and the live connection dies with
+    // "1011 keepalive ping timeout" mid-game.
+    let mcts_result = py.detach(|| {
+        perform_mcts_with_priors(
+            &mut state, s1_options, s2_options, &s1_priors, &s2_priors, duration,
+        )
+    });
     let py_mcts_result = PyMctsResult::from_mcts_result(mcts_result, &state);
     Ok(py_mcts_result)
 }
