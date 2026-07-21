@@ -13,7 +13,10 @@ use poke_engine::engine::state::{MoveChoice, PokemonVolatileStatus, Terrain, Wea
 use poke_engine::instruction::{Instruction, StateInstructions};
 use poke_engine::game::{play_game, play_games, play_games_recorded};
 use poke_engine::engine::evaluate::evaluate;
-use poke_engine::mcts::{perform_mcts, perform_mcts_multi, perform_mcts_with_priors, MctsResult, MctsSideResult};
+use poke_engine::mcts::{
+    perform_mcts, perform_mcts_multi, perform_mcts_with_priors, MctsResult, MctsSideResult,
+    PersistentMcts,
+};
 #[cfg(feature = "policy")]
 use poke_engine::mcts::perform_mcts_with_value;
 #[cfg(feature = "policy")]
@@ -1037,6 +1040,120 @@ fn mcts_with_priors(
     Ok(py_mcts_result)
 }
 
+/// Persistent MCTS with cross-turn tree reuse. Create one per battle (per
+/// sampled world); call `search(ms)` to accumulate visits, then after both
+/// players' choices resolve call `advance(our_move, their_move, new_state)`
+/// to descend into the played-out subtree and keep its visits. Any mismatch
+/// (move outside cached options, option-list drift, no chance outcome close
+/// enough to the observed state) resets to a fresh tree on `new_state`, so
+/// callers can always just `search` afterwards regardless of reuse outcome.
+#[pyclass(name = "MctsHandle", module = "poke_engine")]
+struct PyMctsHandle {
+    inner: PersistentMcts,
+}
+
+impl PyMctsHandle {
+    /// Match a Python-side move string against a side's cached root options,
+    /// using the same string format PyMctsSideResult exposes.
+    fn find_choice(options: &[MoveChoice], side: &Side, wanted: &str) -> Option<MoveChoice> {
+        let wanted = wanted.trim().to_lowercase();
+        options
+            .iter()
+            .find(|mc| movechoice_to_string(side, mc).to_lowercase() == wanted)
+            .cloned()
+    }
+}
+
+#[pymethods]
+impl PyMctsHandle {
+    #[new]
+    fn new(py_state: PyState) -> Self {
+        PyMctsHandle {
+            inner: PersistentMcts::new(py_state.into()),
+        }
+    }
+
+    /// Search for `duration_ms` more milliseconds. Visit counts accumulate
+    /// across calls and across successful advances.
+    fn search(&mut self, py: Python<'_>, duration_ms: u64) -> PyResult<PyMctsResult> {
+        let duration = Duration::from_millis(duration_ms);
+        // Same GIL-release rationale as `mcts`/`mcts_with_priors`: a
+        // multi-second search must not block the asyncio event loop or the
+        // websocket dies with "1011 keepalive ping timeout".
+        let result = py.detach(|| self.inner.search(duration));
+        Ok(PyMctsResult::from_mcts_result(result, self.inner.state()))
+    }
+
+    /// Advance through the transition that actually happened. Returns
+    /// (reused, retained_visits, match_score, reason). On failure the handle
+    /// holds a fresh tree rooted at `py_state` — no cleanup needed.
+    #[pyo3(signature = (s1_move, s2_move, py_state, min_match=0.8))]
+    fn advance(
+        &mut self,
+        s1_move: &str,
+        s2_move: &str,
+        py_state: PyState,
+        min_match: f32,
+    ) -> PyResult<(bool, u32, f32, String)> {
+        let observed: State = py_state.into();
+        let (s1_options, s2_options) = self.inner.root_move_choices();
+        let s1_choice =
+            Self::find_choice(&s1_options, &self.inner.state().side_one, s1_move);
+        let s2_choice =
+            Self::find_choice(&s2_options, &self.inner.state().side_two, s2_move);
+        let report = match (s1_choice, s2_choice) {
+            (Some(s1), Some(s2)) => self.inner.advance(&s1, &s2, observed, min_match),
+            _ => {
+                self.inner.reset(observed);
+                poke_engine::mcts::AdvanceReport {
+                    reused: false,
+                    retained_visits: 0,
+                    match_score: 0.0,
+                    reason: "move string not in root options",
+                }
+            }
+        };
+        Ok((
+            report.reused,
+            report.retained_visits,
+            report.match_score,
+            report.reason.to_string(),
+        ))
+    }
+
+    /// Throw the tree away and re-root on `py_state`.
+    fn reset(&mut self, py_state: PyState) {
+        self.inner.reset(py_state.into());
+    }
+
+    /// Current root option strings, in prior-alignment order: (s1, s2).
+    fn root_options(&self) -> (Vec<String>, Vec<String>) {
+        let (s1, s2) = self.inner.root_move_choices();
+        (
+            s1.iter()
+                .map(|mc| movechoice_to_string(&self.inner.state().side_one, mc))
+                .collect(),
+            s2.iter()
+                .map(|mc| movechoice_to_string(&self.inner.state().side_two, mc))
+                .collect(),
+        )
+    }
+
+    /// Overwrite root priors (aligned to `root_options` order) and enable
+    /// PUCT at the root. Re-apply after every advance/reset: a promoted
+    /// subtree root carries uniform priors.
+    #[pyo3(signature = (s1_priors=None, s2_priors=None))]
+    fn set_priors(&mut self, s1_priors: Option<Vec<f32>>, s2_priors: Option<Vec<f32>>) {
+        self.inner
+            .set_priors(s1_priors.as_deref(), s2_priors.as_deref());
+    }
+
+    #[getter]
+    fn root_visits(&self) -> u32 {
+        self.inner.root_visits()
+    }
+}
+
 /// Value-net leaf evaluator. Loads an ONNX value model once; reuse the
 /// instance across many `mcts_with_value` calls to amortize the load cost.
 #[cfg(feature = "policy")]
@@ -1358,6 +1475,7 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<PyValueNet>()?;
     }
     m.add_function(wrap_pyfunction!(mcts_multi, m)?)?;
+    m.add_class::<PyMctsHandle>()?;
     m.add_function(wrap_pyfunction!(run_games, m)?)?;
     m.add_function(wrap_pyfunction!(run_games_recorded, m)?)?;
     m.add_class::<PyState>()?;
