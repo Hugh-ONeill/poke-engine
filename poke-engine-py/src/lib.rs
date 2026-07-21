@@ -1077,6 +1077,7 @@ impl PyValueNet {
 #[pyfunction]
 #[pyo3(signature = (py_state, value_net, duration_ms, s1_priors=None, s2_priors=None, alpha=1.0, residual=false, batch_size=1))]
 fn mcts_with_value(
+    py: Python<'_>,
     py_state: PyState,
     value_net: PyRef<PyValueNet>,
     duration_ms: u64,
@@ -1089,30 +1090,43 @@ fn mcts_with_value(
     let mut state: State = py_state.into();
     let duration = Duration::from_millis(duration_ms);
     let (s1_options, s2_options) = state.root_get_all_options();
-    let mcts_result = perform_mcts_with_value(
-        &mut state,
-        s1_options,
-        s2_options,
-        s1_priors.as_deref(),
-        s2_priors.as_deref(),
-        &value_net.inner,
-        alpha,
-        residual,
-        batch_size,
-        duration,
-    );
+    // PyRef itself is not Ungil, so borrow the inner net BEFORE detaching and
+    // capture only that reference in the closure (&ValueNet is Send when
+    // ValueNet: Sync). Without releasing the GIL a multi-second value search
+    // blocks the event loop and kills live websockets — the same failure the
+    // priors binding hit.
+    let net = &value_net.inner;
+    let mcts_result = py.detach(|| {
+        perform_mcts_with_value(
+            &mut state,
+            s1_options,
+            s2_options,
+            s1_priors.as_deref(),
+            s2_priors.as_deref(),
+            net,
+            alpha,
+            residual,
+            batch_size,
+            duration,
+        )
+    });
     Ok(PyMctsResult::from_mcts_result(mcts_result, &state))
 }
 
 #[pyfunction]
-fn mcts_multi(py_states: Vec<PyState>, duration_ms: u64) -> PyResult<PyMctsResult> {
+fn mcts_multi(
+    py: Python<'_>,
+    py_states: Vec<PyState>,
+    duration_ms: u64,
+) -> PyResult<PyMctsResult> {
     if py_states.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err("states list is empty"));
     }
     let mut states: Vec<State> = py_states.into_iter().map(|s| s.into()).collect();
     let duration = Duration::from_millis(duration_ms);
     let (s1_options, s2_options) = states[0].root_get_all_options();
-    let mcts_result = perform_mcts_multi(&mut states, s1_options, s2_options, duration);
+    let mcts_result =
+        py.detach(|| perform_mcts_multi(&mut states, s1_options, s2_options, duration));
 
     let py_mcts_result = PyMctsResult::from_mcts_result(mcts_result, &states[0]);
     Ok(py_mcts_result)
