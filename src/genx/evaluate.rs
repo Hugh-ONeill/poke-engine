@@ -5,6 +5,26 @@ use super::state::{PokemonVolatileStatus, Terrain, Weather};
 use crate::choices::{Choices, MoveCategory};
 use crate::state::{Pokemon, PokemonStatus, PokemonType, Side, State};
 
+/// Runtime switch: `CB_EVAL_BASELINE=1` reverts evaluate() to the UPSTREAM
+/// v0.0.47 feature set and constants — i.e. exactly the eval foul-play runs.
+///
+/// Why runtime and not a cargo feature: the A/B harness spawns a fresh process
+/// per game, so an env var picks the arm per process and BOTH arms run one
+/// identical build. A compile-time feature would need a rebuild between arms,
+/// which swaps the .so under a running series and confounds the comparison.
+///
+/// Read once and cached: evaluate() is on the hot path of every rollout, and
+/// both arms pay the same (already-initialized) atomic load, so the switch
+/// cannot bias the throughput comparison in either direction.
+fn baseline_eval() -> bool {
+    static BASELINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BASELINE.get_or_init(|| {
+        std::env::var("CB_EVAL_BASELINE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 const POKEMON_ALIVE: f32 = 30.0;
 const POKEMON_HP: f32 = 100.0;
 const USED_TERA: f32 = -75.0;
@@ -49,6 +69,9 @@ const HEALING_WISH: f32 = 30.0;
 
 const STEALTH_ROCK: f32 = -15.0;
 const SPIKES: f32 = -9.0;
+// upstream v0.0.47 values, used under CB_EVAL_BASELINE
+const STEALTH_ROCK_BASE: f32 = -10.0;
+const SPIKES_BASE: f32 = -7.0;
 const TOXIC_SPIKES: f32 = -7.0;
 const STICKY_WEB: f32 = -25.0;
 
@@ -179,12 +202,15 @@ fn get_boost_multiplier(boost: i8) -> f32 {
 
 fn evaluate_hazards(pokemon: &Pokemon, side: &Side) -> f32 {
     let mut score = 0.0;
+    let base = baseline_eval();
+    let sr = if base { STEALTH_ROCK_BASE } else { STEALTH_ROCK };
+    let sp = if base { SPIKES_BASE } else { SPIKES };
     let pkmn_is_grounded = pokemon.is_grounded();
     if pokemon.item != Items::HEAVYDUTYBOOTS {
         if pokemon.ability != Abilities::MAGICGUARD {
-            score += side.side_conditions.stealth_rock as f32 * STEALTH_ROCK;
+            score += side.side_conditions.stealth_rock as f32 * sr;
             if pkmn_is_grounded {
-                score += side.side_conditions.spikes as f32 * SPIKES;
+                score += side.side_conditions.spikes as f32 * sp;
                 score += side.side_conditions.toxic_spikes as f32 * TOXIC_SPIKES;
             }
         }
@@ -300,6 +326,18 @@ fn evaluate_tera_active(pokemon: &Pokemon) -> f32 {
 
 fn evaluate_active_volatiles(pokemon: &Pokemon, side: &Side) -> f32 {
     let mut score = 0.0;
+    if baseline_eval() {
+        // upstream scores exactly three volatiles
+        for vs in side.volatile_statuses.iter() {
+            match vs {
+                PokemonVolatileStatus::LEECHSEED => score += LEECH_SEED,
+                PokemonVolatileStatus::SUBSTITUTE => score += SUBSTITUTE,
+                PokemonVolatileStatus::CONFUSION => score += CONFUSION,
+                _ => {}
+            }
+        }
+        return score;
+    }
     for vs in side.volatile_statuses.iter() {
         match vs {
             PokemonVolatileStatus::LEECHSEED => score += LEECH_SEED,
@@ -511,7 +549,14 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
         PokemonStatus::NONE => {}
     }
 
-    score += evaluate_item(pokemon.item);
+    // upstream scores "holding any item" as a flat +10; ours prices items individually
+    if baseline_eval() {
+        if pokemon.item != Items::NONE {
+            score += 10.0;
+        }
+    } else {
+        score += evaluate_item(pokemon.item);
+    }
 
     // without this a low hp pokemon could get a negative score and incentivize the other side
     // to keep it alive
@@ -527,10 +572,22 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
 pub fn evaluate(state: &State) -> f32 {
     let mut score = 0.0;
 
+    let base = baseline_eval();
     let s1_active = &state.side_one.pokemon[state.side_one.active_index];
     let s2_active = &state.side_two.pokemon[state.side_two.active_index];
-    let (s1_phys, s1_spec, s1_has_status) = threat_vs(s1_active, s2_active);
-    let (s2_phys, s2_spec, s2_has_status) = threat_vs(s2_active, s1_active);
+    // Upstream scores boosts flat; we scale offensive boosts by how hard the
+    // active can actually hit. In baseline mode the multipliers are 1.0 so the
+    // boost terms reduce exactly to upstream's.
+    let (s1_phys, s1_spec, s1_has_status) = if base {
+        (1.0, 1.0, true)
+    } else {
+        threat_vs(s1_active, s2_active)
+    };
+    let (s2_phys, s2_spec, s2_has_status) = if base {
+        (1.0, 1.0, true)
+    } else {
+        threat_vs(s2_active, s1_active)
+    };
 
     let mut iter = state.side_one.pokemon.into_iter();
     let mut s1_used_tera = false;
@@ -540,7 +597,9 @@ pub fn evaluate(state: &State) -> f32 {
             score += evaluate_hazards(pkmn, &state.side_one);
             if iter.pokemon_index == state.side_one.active_index {
                 score += evaluate_active_volatiles(pkmn, &state.side_one);
-                score += evaluate_tera_active(pkmn);
+                if !base {
+                    score += evaluate_tera_active(pkmn);
+                }
 
                 score += get_boost_multiplier(state.side_one.attack_boost)
                     * POKEMON_ATTACK_BOOST * s1_phys;
@@ -568,7 +627,9 @@ pub fn evaluate(state: &State) -> f32 {
 
             if iter.pokemon_index == state.side_two.active_index {
                 score -= evaluate_active_volatiles(pkmn, &state.side_two);
-                score -= evaluate_tera_active(pkmn);
+                if !base {
+                    score -= evaluate_tera_active(pkmn);
+                }
 
                 score -= get_boost_multiplier(state.side_two.attack_boost)
                     * POKEMON_ATTACK_BOOST * s2_phys;
@@ -601,6 +662,12 @@ pub fn evaluate(state: &State) -> f32 {
     score -= state.side_two.side_conditions.safeguard as f32 * SAFE_GUARD;
     score -= state.side_two.side_conditions.tailwind as f32 * TAILWIND;
     score -= state.side_two.side_conditions.healing_wish as f32 * HEALING_WISH;
+
+    // everything below here is fork-added: upstream's evaluate() ends at the
+    // side-condition block above
+    if base {
+        return score;
+    }
 
     score += evaluate_pending_effects(&state.side_one);
     score -= evaluate_pending_effects(&state.side_two);
