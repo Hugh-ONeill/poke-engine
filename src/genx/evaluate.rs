@@ -16,12 +16,53 @@ use crate::state::{Pokemon, PokemonStatus, PokemonType, Side, State};
 /// Read once and cached: evaluate() is on the hot path of every rollout, and
 /// both arms pay the same (already-initialized) atomic load, so the switch
 /// cannot bias the throughput comparison in either direction.
-fn baseline_eval() -> bool {
-    static BASELINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *BASELINE.get_or_init(|| {
-        std::env::var("CB_EVAL_BASELINE")
+/// Which fork-added eval term groups are reverted to upstream behaviour.
+/// CB_EVAL_BASELINE=1 reverts everything (the original all-or-nothing switch);
+/// CB_EVAL_OFF="hazards,hopeless" reverts individual groups for bisection.
+/// NOTE: `threat` off forces the threat multipliers to 1.0, which makes the
+/// hopeless-matchup condition (threat == 0.0) unreachable — threat off
+/// implies hopeless off.
+#[derive(Default)]
+struct EvalOff {
+    hazards: bool,
+    items: bool,
+    volatiles: bool,
+    threat: bool,
+    tera: bool,
+    pending: bool,
+    weather: bool,
+    terrain: bool,
+    hopeless: bool,
+    speedtier: bool,
+}
+
+impl EvalOff {
+    fn from_spec(all: bool, list: &str) -> Self {
+        let has =
+            |k: &str| all || list.split(',').any(|t| t.trim().eq_ignore_ascii_case(k));
+        EvalOff {
+            hazards: has("hazards"),
+            items: has("items"),
+            volatiles: has("volatiles"),
+            threat: has("threat"),
+            tera: has("tera"),
+            pending: has("pending"),
+            weather: has("weather"),
+            terrain: has("terrain"),
+            hopeless: has("hopeless"),
+            speedtier: has("speedtier"),
+        }
+    }
+}
+
+fn eval_off() -> &'static EvalOff {
+    static OFF: std::sync::OnceLock<EvalOff> = std::sync::OnceLock::new();
+    OFF.get_or_init(|| {
+        let all = std::env::var("CB_EVAL_BASELINE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let list = std::env::var("CB_EVAL_OFF").unwrap_or_default();
+        EvalOff::from_spec(all, &list)
     })
 }
 
@@ -202,7 +243,7 @@ fn get_boost_multiplier(boost: i8) -> f32 {
 
 fn evaluate_hazards(pokemon: &Pokemon, side: &Side) -> f32 {
     let mut score = 0.0;
-    let base = baseline_eval();
+    let base = eval_off().hazards;
     let sr = if base { STEALTH_ROCK_BASE } else { STEALTH_ROCK };
     let sp = if base { SPIKES_BASE } else { SPIKES };
     let pkmn_is_grounded = pokemon.is_grounded();
@@ -326,7 +367,7 @@ fn evaluate_tera_active(pokemon: &Pokemon) -> f32 {
 
 fn evaluate_active_volatiles(pokemon: &Pokemon, side: &Side) -> f32 {
     let mut score = 0.0;
-    if baseline_eval() {
+    if eval_off().volatiles {
         // upstream scores exactly three volatiles
         for vs in side.volatile_statuses.iter() {
             match vs {
@@ -550,7 +591,7 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
     }
 
     // upstream scores "holding any item" as a flat +10; ours prices items individually
-    if baseline_eval() {
+    if eval_off().items {
         if pokemon.item != Items::NONE {
             score += 10.0;
         }
@@ -572,18 +613,18 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
 pub fn evaluate(state: &State) -> f32 {
     let mut score = 0.0;
 
-    let base = baseline_eval();
+    let off = eval_off();
     let s1_active = &state.side_one.pokemon[state.side_one.active_index];
     let s2_active = &state.side_two.pokemon[state.side_two.active_index];
     // Upstream scores boosts flat; we scale offensive boosts by how hard the
-    // active can actually hit. In baseline mode the multipliers are 1.0 so the
-    // boost terms reduce exactly to upstream's.
-    let (s1_phys, s1_spec, s1_has_status) = if base {
+    // active can actually hit. With `threat` off the multipliers are 1.0 so
+    // the boost terms reduce exactly to upstream's.
+    let (s1_phys, s1_spec, s1_has_status) = if off.threat {
         (1.0, 1.0, true)
     } else {
         threat_vs(s1_active, s2_active)
     };
-    let (s2_phys, s2_spec, s2_has_status) = if base {
+    let (s2_phys, s2_spec, s2_has_status) = if off.threat {
         (1.0, 1.0, true)
     } else {
         threat_vs(s2_active, s1_active)
@@ -597,7 +638,7 @@ pub fn evaluate(state: &State) -> f32 {
             score += evaluate_hazards(pkmn, &state.side_one);
             if iter.pokemon_index == state.side_one.active_index {
                 score += evaluate_active_volatiles(pkmn, &state.side_one);
-                if !base {
+                if !off.tera {
                     score += evaluate_tera_active(pkmn);
                 }
 
@@ -627,7 +668,7 @@ pub fn evaluate(state: &State) -> f32 {
 
             if iter.pokemon_index == state.side_two.active_index {
                 score -= evaluate_active_volatiles(pkmn, &state.side_two);
-                if !base {
+                if !off.tera {
                     score -= evaluate_tera_active(pkmn);
                 }
 
@@ -665,16 +706,14 @@ pub fn evaluate(state: &State) -> f32 {
 
     // everything below here is fork-added: upstream's evaluate() ends at the
     // side-condition block above
-    if base {
-        return score;
+    if !off.pending {
+        score += evaluate_pending_effects(&state.side_one);
+        score -= evaluate_pending_effects(&state.side_two);
     }
-
-    score += evaluate_pending_effects(&state.side_one);
-    score -= evaluate_pending_effects(&state.side_two);
 
     let trick_room = state.trick_room.active;
     let weather = state.weather.weather_type;
-    if weather != Weather::NONE {
+    if !off.weather && weather != Weather::NONE {
         let s1_active = state.side_one.get_active_immutable();
         let s2_active = state.side_two.get_active_immutable();
         if s1_active.hp > 0 {
@@ -686,7 +725,7 @@ pub fn evaluate(state: &State) -> f32 {
     }
 
     let terrain = state.terrain.terrain_type;
-    if terrain != Terrain::NONE {
+    if !off.terrain && terrain != Terrain::NONE {
         let s1_active = state.side_one.get_active_immutable();
         let s2_active = state.side_two.get_active_immutable();
         if s1_active.hp > 0 {
@@ -700,16 +739,18 @@ pub fn evaluate(state: &State) -> f32 {
     // Hopeless matchup: an active that can't damage the opponent at all AND has no status
     // moves is dead weight. Defensive walls with Roost/setup/hazards/phaze aren't hopeless —
     // they still have work to do even when their attacks register 0x.
-    if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 && !s1_has_status {
-        score += HOPELESS_MATCHUP;
-    }
-    if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 && !s2_has_status {
-        score -= HOPELESS_MATCHUP;
+    if !off.hopeless {
+        if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 && !s1_has_status {
+            score += HOPELESS_MATCHUP;
+        }
+        if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 && !s2_has_status {
+            score -= HOPELESS_MATCHUP;
+        }
     }
 
     // Speed-tier: outspeeding only matters if you can land a hit. Trick Room reverses
     // the comparison.
-    if s1_active.hp > 0 && s2_active.hp > 0 {
+    if !off.speedtier && s1_active.hp > 0 && s2_active.hp > 0 {
         let trick_room = state.trick_room.active;
         let s1_faster = if trick_room {
             s1_active.speed < s2_active.speed
@@ -735,4 +776,22 @@ pub fn evaluate(state: &State) -> f32 {
     }
 
     score
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EvalOff;
+
+    #[test]
+    fn from_spec_parses_list_and_all() {
+        let off = EvalOff::from_spec(false, "hazards, HOPELESS");
+        assert!(off.hazards && off.hopeless);
+        assert!(!off.threat && !off.items && !off.tera && !off.speedtier);
+        let all = EvalOff::from_spec(true, "");
+        assert!(all.hazards && all.items && all.volatiles && all.threat
+            && all.tera && all.pending && all.weather && all.terrain
+            && all.hopeless && all.speedtier);
+        let none = EvalOff::from_spec(false, "");
+        assert!(!none.hazards && !none.hopeless && !none.volatiles);
+    }
 }
