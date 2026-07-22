@@ -3,7 +3,6 @@ use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
 use crate::instruction::StateInstructions;
 use crate::state::State;
-use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rand::rng;
 use std::collections::HashMap;
@@ -140,7 +139,11 @@ impl Node {
         choice
     }
 
-    pub unsafe fn selection(&mut self, state: &mut State) -> (*mut Node, usize, usize) {
+    pub unsafe fn selection(
+        &mut self,
+        state: &mut State,
+        rng: &mut impl Rng,
+    ) -> (*mut Node, usize, usize) {
         let return_node = self as *mut Node;
         if self.s1_options.is_none() {
             let (s1_options, s2_options) = state.get_all_options();
@@ -154,24 +157,46 @@ impl Node {
         match child_vector {
             Some(child_vector) => {
                 let child_vec_ptr = child_vector as *mut Vec<Node>;
-                let chosen_child = self.sample_node(child_vec_ptr);
+                let chosen_child = self.sample_node(child_vec_ptr, rng);
                 state.apply_instructions(&(*chosen_child).instructions.instruction_list);
-                (*chosen_child).selection(state)
+                (*chosen_child).selection(state, rng)
             }
             None => (return_node, s1_mc_index, s2_mc_index),
         }
     }
 
-    unsafe fn sample_node(&self, move_vector: *mut Vec<Node>) -> *mut Node {
-        let mut rng = rng();
-        let weights: Vec<f64> = (*move_vector)
+    /// Weighted pick over a move pair's chance outcomes.
+    ///
+    /// Ported from upstream 79f8186 (measured ~5% there): the old version
+    /// allocated a Vec<f64> and built a WeightedIndex on EVERY sampling, then
+    /// dropped both — and this runs on every selection step and every expand.
+    /// A running-threshold scan needs no allocation. The rng is passed in
+    /// rather than calling rng() per node, which also puts seeding in one place.
+    unsafe fn sample_node(&self, move_vector: *mut Vec<Node>, rng: &mut impl Rng) -> *mut Node {
+        let nodes = &mut *move_vector;
+
+        let total_weight: f32 = nodes
             .iter()
-            .map(|x| x.instructions.percentage as f64)
-            .collect();
-        let dist = WeightedIndex::new(weights).unwrap();
-        let chosen_node = &mut (&mut *move_vector)[dist.sample(&mut rng)];
-        let chosen_node_ptr = chosen_node as *mut Node;
-        chosen_node_ptr
+            .map(|n| n.instructions.percentage.max(0.0))
+            .sum();
+
+        // degenerate case: no positive weight anywhere. random_range would
+        // panic on an empty range, so pick the last node directly.
+        let last = nodes.len() - 1;
+        if !(total_weight > 0.0) {
+            return &mut nodes[last] as *mut Node;
+        }
+
+        let mut threshold = rng.random_range(0.0..total_weight);
+        for node in nodes.iter_mut() {
+            threshold -= node.instructions.percentage.max(0.0);
+            if threshold <= 0.0 {
+                return node as *mut Node;
+            }
+        }
+
+        // fallback: last node (handles float rounding issues that can come up)
+        &mut nodes[last] as *mut Node
     }
 
     pub unsafe fn expand(
@@ -179,6 +204,7 @@ impl Node {
         state: &mut State,
         s1_move_index: usize,
         s2_move_index: usize,
+        rng: &mut impl Rng,
     ) -> *mut Node {
         let s1_move = &self.s1_options.as_ref().unwrap()[s1_move_index].move_choice;
         let s2_move = &self.s2_options.as_ref().unwrap()[s2_move_index].move_choice;
@@ -204,7 +230,7 @@ impl Node {
 
         // sample a node from the new instruction list.
         // this is the node that the rollout will be done on
-        let new_node_ptr = self.sample_node(&mut this_pair_vec);
+        let new_node_ptr = self.sample_node(&mut this_pair_vec, rng);
         state.apply_instructions(&(*new_node_ptr).instructions.instruction_list);
         self.children
             .insert((s1_move_index, s2_move_index), this_pair_vec);
@@ -234,7 +260,11 @@ impl Node {
     /// Like `selection` but increments `pending_visits` on each MoveNode it
     /// selects along the descent. Used in batched MCTS so K concurrent
     /// selections within one batch spread across different moves.
-    pub unsafe fn selection_with_vloss(&mut self, state: &mut State) -> (*mut Node, usize, usize) {
+    pub unsafe fn selection_with_vloss(
+        &mut self,
+        state: &mut State,
+        rng: &mut impl Rng,
+    ) -> (*mut Node, usize, usize) {
         let return_node = self as *mut Node;
         if self.s1_options.is_none() {
             let (s1_options, s2_options) = state.get_all_options();
@@ -253,9 +283,9 @@ impl Node {
         match child_vector {
             Some(child_vector) => {
                 let child_vec_ptr = child_vector as *mut Vec<Node>;
-                let chosen_child = self.sample_node(child_vec_ptr);
+                let chosen_child = self.sample_node(child_vec_ptr, rng);
                 state.apply_instructions(&(*chosen_child).instructions.instruction_list);
-                (*chosen_child).selection_with_vloss(state)
+                (*chosen_child).selection_with_vloss(state, rng)
             }
             None => (return_node, s1_mc_index, s2_mc_index),
         }
@@ -371,9 +401,9 @@ pub struct MctsResult {
     pub iteration_count: u32,
 }
 
-fn do_mcts(root_node: &mut Node, state: &mut State, root_eval: &f32) {
-    let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state) };
-    new_node = unsafe { (*new_node).expand(state, s1_move, s2_move) };
+fn do_mcts(root_node: &mut Node, state: &mut State, root_eval: &f32, rng: &mut impl Rng) {
+    let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state, rng) };
+    new_node = unsafe { (*new_node).expand(state, s1_move, s2_move, rng) };
     let rollout_result = unsafe { (*new_node).rollout(state, root_eval) };
     unsafe { (*new_node).backpropagate(rollout_result, state) }
 }
@@ -393,9 +423,10 @@ fn do_mcts_with_value_net(
     root_v: &f32,
     alpha: f32,
     residual: bool,
+    rng: &mut impl Rng,
 ) {
-    let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state) };
-    new_node = unsafe { (*new_node).expand(state, s1_move, s2_move) };
+    let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state, rng) };
+    new_node = unsafe { (*new_node).expand(state, s1_move, s2_move, rng) };
     // Two leaf-eval modes:
     //  blend:    rollout = alpha * sigmoid(logit(v) - logit(root_v))
     //                    + (1 - alpha) * sigmoid(eval - root_eval)
@@ -441,10 +472,11 @@ pub fn perform_mcts(
     root_node.root = true;
 
     let root_eval = evaluate(state);
+    let mut rng = rng();
     let start_time = std::time::Instant::now();
     while start_time.elapsed() < max_time {
         for _ in 0..1000 {
-            do_mcts(&mut root_node, state, &root_eval);
+            do_mcts(&mut root_node, state, &root_eval, &mut rng);
         }
 
         /*
@@ -512,10 +544,11 @@ pub fn perform_mcts_with_priors(
     root_node.use_priors = true;
 
     let root_eval = evaluate(state);
+    let mut rng = rng();
     let start_time = std::time::Instant::now();
     while start_time.elapsed() < max_time {
         for _ in 0..1000 {
-            do_mcts(&mut root_node, state, &root_eval);
+            do_mcts(&mut root_node, state, &root_eval, &mut rng);
         }
         if root_node.times_visited == 10_000_000 {
             break;
@@ -580,6 +613,7 @@ pub fn perform_mcts_multi(
 
     // average root eval across all states
     let root_eval: f32 = states.iter().map(|s| evaluate(s)).sum::<f32>() / states.len() as f32;
+    let mut rng = rng();
 
     let n_states = states.len();
     let start_time = std::time::Instant::now();
@@ -590,7 +624,7 @@ pub fn perform_mcts_multi(
         // guarantees equal coverage across all sampled opponent teams
         let state = &mut states[state_idx];
         for _ in 0..1000 {
-            do_mcts(&mut root_node, state, &root_eval);
+            do_mcts(&mut root_node, state, &root_eval, &mut rng);
         }
         state_idx = (state_idx + 1) % n_states;
 
@@ -643,6 +677,7 @@ fn do_mcts_with_value_batched(
     alpha: f32,
     residual: bool,
     batch_size: usize,
+    rng: &mut impl Rng,
 ) {
     struct Pending {
         state: State,
@@ -661,9 +696,9 @@ fn do_mcts_with_value_batched(
     for _ in 0..batch_size {
         let mut state_copy = root_state.clone();
         let (parent_ptr, s1_idx, s2_idx) = unsafe {
-            root_node.selection_with_vloss(&mut state_copy)
+            root_node.selection_with_vloss(&mut state_copy, rng)
         };
-        let leaf_ptr = unsafe { (*parent_ptr).expand(&mut state_copy, s1_idx, s2_idx) };
+        let leaf_ptr = unsafe { (*parent_ptr).expand(&mut state_copy, s1_idx, s2_idx, rng) };
         let no_child = std::ptr::eq(leaf_ptr, parent_ptr);
         let battle_outcome = state_copy.battle_is_over();
         // Only call the value net when battle isn't over AND its output
@@ -781,6 +816,7 @@ pub fn perform_mcts_with_value(
     } else {
         0.5
     };
+    let mut rng = rng();
     let start_time = std::time::Instant::now();
     let use_batched = batch_size > 1;
     let inner_loop_count = if use_batched { 1000 / batch_size.max(1) } else { 1000 };
@@ -793,12 +829,14 @@ pub fn perform_mcts_with_value(
                 do_mcts_with_value_batched(
                     &mut root_node, root_state_ref, value_net,
                     &root_eval, &root_v, alpha, residual, batch_size,
+                    &mut rng,
                 );
             }
         } else {
             for _ in 0..1000 {
                 do_mcts_with_value_net(&mut root_node, state, value_net,
-                                       &root_eval, &root_v, alpha, residual);
+                                       &root_eval, &root_v, alpha, residual,
+                                       &mut rng);
             }
         }
         if root_node.times_visited == 10_000_000 {
@@ -1023,10 +1061,11 @@ impl PersistentMcts {
     /// Visit counts in the result are cumulative across calls and advances.
     pub fn search(&mut self, max_time: Duration) -> MctsResult {
         let root_eval = self.root_eval;
+        let mut rng = rng();
         let start_time = std::time::Instant::now();
         while start_time.elapsed() < max_time {
             for _ in 0..1000 {
-                do_mcts(&mut self.root, &mut self.state, &root_eval);
+                do_mcts(&mut self.root, &mut self.state, &root_eval, &mut rng);
             }
             // >= not ==: a reused tree can arrive at the cap mid-batch.
             if self.root.times_visited >= 10_000_000 {
