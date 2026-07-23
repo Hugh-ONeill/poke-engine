@@ -2,7 +2,7 @@ use super::abilities::Abilities;
 use super::damage_calc::type_effectiveness_modifier;
 use super::items::Items;
 use super::state::{PokemonVolatileStatus, Terrain, Weather};
-use crate::choices::{Choices, MoveCategory};
+use crate::choices::{Choices, MoveCategory, MoveTarget};
 use crate::state::{Pokemon, PokemonStatus, PokemonType, Side, State};
 
 /// Runtime switch: `CB_EVAL_BASELINE=1` reverts evaluate() to the UPSTREAM
@@ -34,6 +34,8 @@ struct EvalOff {
     terrain: bool,
     hopeless: bool,
     speedtier: bool,
+    poisonheal: bool,
+    pp: bool,
 }
 
 impl EvalOff {
@@ -51,6 +53,8 @@ impl EvalOff {
             terrain: has("terrain"),
             hopeless: has("hopeless"),
             speedtier: has("speedtier"),
+            poisonheal: has("poisonheal"),
+            pp: has("pp"),
         }
     }
 }
@@ -96,6 +100,25 @@ const POKEMON_PARALYZED: f32 = -25.0;
 const POKEMON_TOXIC: f32 = -30.0;
 const POKEMON_POISONED: f32 = -10.0;
 const POKEMON_BURNED: f32 = -25.0;
+
+// Poison Heal annuity (fork, 2026-07-23): the stall audit showed a Poison
+// Heal Gliscor generating ~7.6 mons of free healing per marathon game — the
+// largest single resource in a stall war — while the eval priced the statused
+// state at +15 and a loaded-but-unactivated Toxic Orb at just the +4 item
+// value. Raise the statused credit and price the pending activation so the
+// search hurries the orb online, treats a pre-activation Knock Off as a real
+// loss, and values fielding the mon at all. CB_EVAL_OFF=poisonheal reverts.
+const POISON_HEAL_STATUSED: f32 = 35.0;
+const POISON_HEAL_PENDING: f32 = 15.0;
+
+// Recovery-PP depletion (fork, 2026-07-23): both sides hit the 8-PP recovery
+// caps in every audited marathon and the eval was PP-blind — a wall with 0
+// Recover PP scored like a full one. Penalize MISSING recovery PP (zero at
+// full PP, so team baselines don't shift) on the last RECOVERY_PP_CAP charges:
+// burning a click costs 2, opposing Pressure makes it 4. CB_EVAL_OFF=pp
+// reverts.
+const RECOVERY_PP_VALUE: f32 = 2.0;
+const RECOVERY_PP_CAP: i8 = 8;
 
 const LEECH_SEED: f32 = -30.0;
 const SUBSTITUTE: f32 = 40.0;
@@ -192,7 +215,13 @@ const TERA_STAB_AVAILABLE: f32 = 12.0;  // active has a damaging tera_type move
 
 fn evaluate_poison(pokemon: &Pokemon, base_score: f32) -> f32 {
     match pokemon.ability {
-        Abilities::POISONHEAL => 15.0,
+        Abilities::POISONHEAL => {
+            if eval_off().poisonheal {
+                15.0
+            } else {
+                POISON_HEAL_STATUSED
+            }
+        }
         Abilities::GUTS
         | Abilities::MARVELSCALE
         | Abilities::QUICKFEET
@@ -596,6 +625,32 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
         PokemonStatus::NONE => {}
     }
 
+    if !eval_off().poisonheal
+        && pokemon.ability == Abilities::POISONHEAL
+        && pokemon.status == PokemonStatus::NONE
+        && pokemon.item == Items::TOXICORB
+    {
+        score += POISON_HEAL_PENDING;
+    }
+
+    if !eval_off().pp {
+        for mv in pokemon.moves.into_iter() {
+            if mv.id == Choices::NONE {
+                continue;
+            }
+            let is_recovery = mv.id == Choices::REST
+                || mv
+                    .choice
+                    .heal
+                    .as_ref()
+                    .map_or(false, |h| h.target == MoveTarget::User);
+            if is_recovery {
+                score -= RECOVERY_PP_VALUE
+                    * (RECOVERY_PP_CAP - mv.pp.min(RECOVERY_PP_CAP)).max(0) as f32;
+            }
+        }
+    }
+
     // upstream scores "holding any item" as a flat +10; ours prices items individually
     if eval_off().items {
         if pokemon.item != Items::NONE {
@@ -793,11 +848,14 @@ mod tests {
         let off = EvalOff::from_spec(false, "hazards, HOPELESS");
         assert!(off.hazards && off.hopeless);
         assert!(!off.threat && !off.items && !off.tera && !off.speedtier);
+        assert!(!off.poisonheal && !off.pp);
         let all = EvalOff::from_spec(true, "");
         assert!(all.hazards && all.items && all.volatiles && all.threat
             && all.tera && all.pending && all.weather && all.terrain
-            && all.hopeless && all.speedtier);
+            && all.hopeless && all.speedtier && all.poisonheal && all.pp);
         let none = EvalOff::from_spec(false, "");
         assert!(!none.hazards && !none.hopeless && !none.volatiles);
+        let ph = EvalOff::from_spec(false, "poisonheal,pp");
+        assert!(ph.poisonheal && ph.pp && !ph.hazards);
     }
 }
