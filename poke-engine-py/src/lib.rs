@@ -981,6 +981,14 @@ fn py_evaluate(py_state: PyState) -> PyResult<f32> {
     Ok(evaluate(&state))
 }
 
+/// Per-battle archetype mode switch: the driver sets this at team preview
+/// (wall-war detection) and the eval reads it on every leaf. Process-wide;
+/// bench workers play one battle at a time so per-battle semantics hold.
+#[pyfunction]
+fn set_stall_mode(on: bool) {
+    poke_engine::engine::evaluate::set_stall_mode(on);
+}
+
 #[cfg(feature = "policy")]
 #[pyfunction(name = "extract_features_v3")]
 fn py_extract_features_v3(py_state: PyState) -> PyResult<Vec<f32>> {
@@ -1464,6 +1472,7 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_instructions, m)?)?;
     m.add_function(wrap_pyfunction!(id, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate, m)?)?;
+    m.add_function(wrap_pyfunction!(set_stall_mode, m)?)?;
     m.add_function(wrap_pyfunction!(mcts, m)?)?;
     m.add_function(wrap_pyfunction!(mcts_with_priors, m)?)?;
     #[cfg(feature = "policy")]

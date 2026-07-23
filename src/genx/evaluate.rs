@@ -38,6 +38,7 @@ struct EvalOff {
     pp: bool,
     synergy: bool,
     threatv2: bool,
+    baseline: bool,
 }
 
 impl EvalOff {
@@ -70,8 +71,30 @@ impl EvalOff {
             pp: has("pp"),
             synergy: !has_on("synergy"),
             threatv2: !has_on("threatv2"),
+            baseline: all,
         }
     }
+}
+
+/// Stall-mode (fork, 2026-07-23): a PER-BATTLE archetype mode set by the
+/// driver at team preview when BOTH teams read as wall-heavy (recovery-move
+/// density). The parked synergy terms are globally winrate-neutral but their
+/// target context is the wall-war, so they activate only there, and the
+/// recovery-PP depletion penalty doubles (PP economics decide those games —
+/// stall audit 2026-07-23). An env var can't carry this: bench workers are
+/// persistent processes rotating teams per game, so it's an atomic the driver
+/// sets each preview (one battle per process at a time). Never active under
+/// CB_EVAL_BASELINE. First of the archetype modes — extend to an enum if
+/// more matchup profiles earn their keep.
+pub static STALL_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_stall_mode(on: bool) {
+    STALL_MODE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn stall_mode() -> bool {
+    STALL_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn eval_off() -> &'static EvalOff {
@@ -268,7 +291,10 @@ fn evaluate_burned(pokemon: &Pokemon) -> f32 {
 
     // Flare Boost wants the burn just like Guts does (fork; upstream list below
     // stays untouched for CB_EVAL_BASELINE parity)
-    if !eval_off().synergy && pokemon.ability == Abilities::FLAREBOOST {
+    let off = eval_off();
+    if (!off.synergy || (stall_mode() && !off.baseline))
+        && pokemon.ability == Abilities::FLAREBOOST
+    {
         return -2.0 * POKEMON_BURNED;
     }
 
@@ -798,13 +824,19 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
                     .as_ref()
                     .map_or(false, |h| h.target == MoveTarget::User);
             if is_recovery {
-                score -= RECOVERY_PP_VALUE
+                // in stall mode PP economics decide the game — double the tax
+                let ppv = if stall_mode() && !eval_off().baseline {
+                    RECOVERY_PP_VALUE * 2.0
+                } else {
+                    RECOVERY_PP_VALUE
+                };
+                score -= ppv
                     * (RECOVERY_PP_CAP - mv.pp.min(RECOVERY_PP_CAP)).max(0) as f32;
             }
         }
     }
 
-    if !eval_off().synergy {
+    if !eval_off().synergy || (stall_mode() && !eval_off().baseline) {
         if pokemon.status == PokemonStatus::NONE {
             score += match (pokemon.ability, pokemon.item) {
                 (Abilities::GUTS, Items::FLAMEORB)
@@ -1134,5 +1166,16 @@ mod tests {
         assert!(!on.synergy && !on.threatv2 && !on.hazards);
         let ph = EvalOff::from_spec(false, "poisonheal,pp", "");
         assert!(ph.poisonheal && ph.pp && !ph.hazards && ph.synergy);
+        assert!(!ph.baseline && EvalOff::from_spec(true, "", "").baseline);
+    }
+
+    #[test]
+    fn stall_mode_flag_round_trips() {
+        use super::{set_stall_mode, stall_mode};
+        assert!(!stall_mode());
+        set_stall_mode(true);
+        assert!(stall_mode());
+        set_stall_mode(false);
+        assert!(!stall_mode());
     }
 }
