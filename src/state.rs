@@ -1158,6 +1158,11 @@ impl Side {
         let mut vs_hashset = HashSet::new();
         if split[8] != "" {
             for item in split[8].split(":") {
+                // the serializer trails every entry with ':' — the empty final
+                // segment would otherwise parse as a phantom NONE volatile
+                if item.is_empty() {
+                    continue;
+                }
                 vs_hashset.insert(PokemonVolatileStatus::from_str(item).unwrap());
             }
         }
