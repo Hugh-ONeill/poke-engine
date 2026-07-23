@@ -36,6 +36,7 @@ struct EvalOff {
     speedtier: bool,
     poisonheal: bool,
     pp: bool,
+    synergy: bool,
 }
 
 impl EvalOff {
@@ -55,6 +56,7 @@ impl EvalOff {
             speedtier: has("speedtier"),
             poisonheal: has("poisonheal"),
             pp: has("pp"),
+            synergy: has("synergy"),
         }
     }
 }
@@ -119,6 +121,22 @@ const POISON_HEAL_PENDING: f32 = 15.0;
 // reverts.
 const RECOVERY_PP_VALUE: f32 = 2.0;
 const RECOVERY_PP_CAP: i8 = 8;
+
+// Status-synergy rifle terms (fork, 2026-07-23): the Poison Heal finding
+// generalized. Same pending-activation logic for the Guts family (the
+// burned-Guts STATE already scores +50 in evaluate_burned, so the loaded orb
+// deserves more than the flat +4 item value); a self-status orb held WITHOUT
+// a benefiting ability is a liability, not an asset (net -12 after the +4
+// item value), as is Black Sludge on a non-Poison holder (net -12 after +9);
+// a sleeper with Sleep Talk PP is nowhere near -25 disabled; and Regenerator
+// carries invisible switch-out income exactly like Poison Heal carries
+// end-of-turn income. CB_EVAL_OFF=synergy reverts the lot.
+const GUTS_FAMILY_PENDING: f32 = 15.0;
+const QUICK_FEET_PENDING: f32 = 8.0;
+const ORB_NO_SYNERGY: f32 = -16.0;
+const SLUDGE_NO_POISON: f32 = -21.0;
+const REST_TALK_SLEEP_REBATE: f32 = 15.0;
+const REGENERATOR_PENDING: f32 = 0.5;
 
 const LEECH_SEED: f32 = -30.0;
 const SUBSTITUTE: f32 = 40.0;
@@ -234,6 +252,12 @@ fn evaluate_poison(pokemon: &Pokemon, base_score: f32) -> f32 {
 fn evaluate_burned(pokemon: &Pokemon) -> f32 {
     // burn is not as punishing in certain situations
 
+    // Flare Boost wants the burn just like Guts does (fork; upstream list below
+    // stays untouched for CB_EVAL_BASELINE parity)
+    if !eval_off().synergy && pokemon.ability == Abilities::FLAREBOOST {
+        return -2.0 * POKEMON_BURNED;
+    }
+
     // guts, marvel scale, quick feet will result in a positive evaluation
     match pokemon.ability {
         Abilities::GUTS | Abilities::MARVELSCALE | Abilities::QUICKFEET => {
@@ -316,8 +340,31 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
     let mut best_spec: f32 = 0.0;
     let mut has_status = false;
     let def_hp = defender.maxhp.max(1) as f32;
-    let atk_stat = attacker.attack as f32;
-    let spa_stat = attacker.special_attack as f32;
+    // Status-aware offense (2026-07-23): a burned physical attacker threatens
+    // at half, Guts/Toxic Boost/Flare Boost at 1.5x, and Facade doubles when
+    // statused — without this a Flame Orb Ursaluna reads as half its real
+    // threat and a burned wall-breaker as double. threat_vs is fork-only, so
+    // the threat knob already reverts all of it.
+    let statused = attacker.status != PokemonStatus::NONE;
+    let burned = attacker.status == PokemonStatus::BURN;
+    let poisoned = matches!(
+        attacker.status,
+        PokemonStatus::POISON | PokemonStatus::TOXIC
+    );
+    let guts = attacker.ability == Abilities::GUTS && statused;
+    let atk_mult = if guts || (poisoned && attacker.ability == Abilities::TOXICBOOST)
+    {
+        1.5
+    } else {
+        1.0
+    };
+    let spa_mult = if burned && attacker.ability == Abilities::FLAREBOOST {
+        1.5
+    } else {
+        1.0
+    };
+    let atk_stat = attacker.attack as f32 * atk_mult;
+    let spa_stat = attacker.special_attack as f32 * spa_mult;
     let def_stat = defender.defense.max(1) as f32;
     let spd_stat = defender.special_defense.max(1) as f32;
     for mv in attacker.moves.into_iter() {
@@ -326,8 +373,11 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
         match mv.choice.category {
             MoveCategory::Physical | MoveCategory::Special => {
                 if eff == 0.0 { continue; }
-                let bp = mv.choice.base_power;
+                let mut bp = mv.choice.base_power;
                 if bp == 0.0 { continue; }
+                if mv.id == Choices::FACADE && statused {
+                    bp *= 2.0;
+                }
                 let stab = if mv.choice.move_type == attacker.types.0
                     || mv.choice.move_type == attacker.types.1 {
                     1.5
@@ -339,8 +389,19 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
                 } else {
                     (spa_stat, spd_stat)
                 };
+                // burn halves physical damage unless Guts (or Facade, which
+                // ignores the burn drop)
+                let burn_mult = if burned
+                    && mv.choice.category == MoveCategory::Physical
+                    && !guts
+                    && mv.id != Choices::FACADE
+                {
+                    0.5
+                } else {
+                    1.0
+                };
                 // Lv100 simplified damage: 0.84 * BP * (off/def) * STAB * type_eff
-                let dmg = 0.84 * bp * (off / def) * stab * eff;
+                let dmg = 0.84 * bp * (off / def) * stab * eff * burn_mult;
                 let frac = dmg / def_hp;
                 // 2HKO (50% per hit) → 1.0 threat; OHKO+ clamps at 1.0
                 let score = (frac / 0.5).min(1.0);
@@ -651,6 +712,44 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
         }
     }
 
+    if !eval_off().synergy {
+        if pokemon.status == PokemonStatus::NONE {
+            score += match (pokemon.ability, pokemon.item) {
+                (Abilities::GUTS, Items::FLAMEORB)
+                | (Abilities::TOXICBOOST, Items::TOXICORB)
+                | (Abilities::FLAREBOOST, Items::FLAMEORB) => GUTS_FAMILY_PENDING,
+                (Abilities::QUICKFEET, Items::FLAMEORB | Items::TOXICORB) => {
+                    QUICK_FEET_PENDING
+                }
+                // Poison Heal pending is priced above; Magic Guard orbs are
+                // status-blocking tech, not a liability
+                (Abilities::POISONHEAL | Abilities::MAGICGUARD, _) => 0.0,
+                (_, Items::TOXICORB | Items::FLAMEORB) => ORB_NO_SYNERGY,
+                _ => 0.0,
+            };
+        }
+        if pokemon.item == Items::BLACKSLUDGE
+            && !pokemon.has_type(&PokemonType::POISON)
+        {
+            score += SLUDGE_NO_POISON;
+        }
+        if pokemon.status == PokemonStatus::SLEEP {
+            for mv in pokemon.moves.into_iter() {
+                if mv.id == Choices::SLEEPTALK && mv.pp > 0 {
+                    score += REST_TALK_SLEEP_REBATE;
+                    break;
+                }
+            }
+        }
+        if pokemon.ability == Abilities::REGENERATOR && pokemon.hp < pokemon.maxhp {
+            let missing = (pokemon.maxhp - pokemon.hp) as f32;
+            let third = pokemon.maxhp as f32 / 3.0;
+            score += REGENERATOR_PENDING * missing.min(third)
+                / pokemon.maxhp as f32
+                * POKEMON_HP;
+        }
+    }
+
     // upstream scores "holding any item" as a flat +10; ours prices items individually
     if eval_off().items {
         if pokemon.item != Items::NONE {
@@ -856,6 +955,9 @@ mod tests {
         let none = EvalOff::from_spec(false, "");
         assert!(!none.hazards && !none.hopeless && !none.volatiles);
         let ph = EvalOff::from_spec(false, "poisonheal,pp");
-        assert!(ph.poisonheal && ph.pp && !ph.hazards);
+        assert!(ph.poisonheal && ph.pp && !ph.hazards && !ph.synergy);
+        let sy = EvalOff::from_spec(false, "synergy");
+        assert!(sy.synergy && !sy.poisonheal && !sy.pp);
+        assert!(EvalOff::from_spec(true, "").synergy);
     }
 }
