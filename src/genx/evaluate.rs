@@ -335,6 +335,17 @@ const SPEED_TIER_BONUS: f32 = 20.0;
 // — e.g. Liquidation vs full-HP Cresselia is "1.0 type-eff" but ~28% per hit, so the
 // real threat is ~0.56, not 1.0. Used to gate boost values, HOPELESS, and SPEED_TIER
 // so attackers stuck against walls don't accumulate phantom value.
+// Tinted Lens / Neuroforce read the DEFENDER's matchup, so they can't live in
+// the (ability, choice) mirror — they adjust eff where threat_vs has it in
+// hand. Same parity-test contract as threat_ability_bp_mult.
+fn threat_eff_adjust(ability: &Abilities, eff: f32) -> f32 {
+    match ability {
+        Abilities::TINTEDLENS if eff > 0.0 && eff < 1.0 => 2.0,
+        Abilities::NEUROFORCE if eff > 1.0 => 1.25,
+        _ => 1.0,
+    }
+}
+
 // Mirrors of the big ability_modify_attack_being_used BP hooks. Kept as cheap
 // constants because the real pipeline needs Choice clones + full hook dispatch
 // with state context — too heavy for the evaluate() hot path (~1M calls/s).
@@ -395,6 +406,7 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
         match mv.choice.category {
             MoveCategory::Physical | MoveCategory::Special => {
                 if eff == 0.0 { continue; }
+                let eff = eff * threat_eff_adjust(&attacker.ability, eff);
                 let mut bp = mv.choice.base_power;
                 if bp == 0.0 { continue; }
                 if mv.id == Choices::FACADE && statused {
@@ -430,6 +442,7 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
                     Items::CHOICEBAND if physical => 1.5,
                     Items::CHOICESPECS if !physical => 1.5,
                     Items::LIFEORB => 1.3,
+                    Items::EXPERTBELT if eff > 1.0 => 1.2,
                     _ => 1.0,
                 };
                 let def_mult = match defender.ability {
@@ -1037,6 +1050,40 @@ mod tests {
                 "{:?} + {:?}: real pipeline {} vs threat mirror {}",
                 ability,
                 move_id,
+                real_mult,
+                mirror
+            );
+        }
+
+        // eff-dependent abilities: give the defender a STEEL typing so Body
+        // Slam is resisted (0.5x) and Close Combat is super-effective (2x)
+        use super::threat_eff_adjust;
+        use crate::state::PokemonType;
+        state.side_two.get_active().types = (PokemonType::STEEL, PokemonType::TYPELESS);
+        let eff_cases = [
+            (Abilities::TINTEDLENS, Choices::BODYSLAM, 0.5),
+            (Abilities::TINTEDLENS, Choices::CLOSECOMBAT, 2.0),
+            (Abilities::NEUROFORCE, Choices::CLOSECOMBAT, 2.0),
+            (Abilities::NEUROFORCE, Choices::BODYSLAM, 0.5),
+        ];
+        for (ability, move_id, eff) in eff_cases {
+            let base = MOVES.get(&move_id).unwrap().clone();
+            state.side_one.get_active().ability = ability;
+            let mut real = base.clone();
+            ability_modify_attack_being_used(
+                &state,
+                &mut real,
+                &Choice::default(),
+                &SideReference::SideOne,
+            );
+            let real_mult = real.base_power / base.base_power;
+            let mirror = threat_eff_adjust(&ability, eff);
+            assert!(
+                (real_mult - mirror).abs() < 1e-4,
+                "{:?} + {:?} at eff {}: real {} vs mirror {}",
+                ability,
+                move_id,
+                eff,
                 real_mult,
                 mirror
             );
