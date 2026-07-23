@@ -268,6 +268,33 @@ const TERA_IMMUNE_BONUS: f32 = 6.0;     // immune to a common attack type
 const TERA_WEAK_PENALTY: f32 = -2.0;    // 2x weakness
 const TERA_STAB_AVAILABLE: f32 = 12.0;  // active has a damaging tera_type move
 
+// Toxic on a WALL in a wall-war is not a -30 status: it is a compounding
+// PP-drain engine — the tox clock forces recovery clicks against an 8-PP
+// budget, and the stallB win/loss audit (2026-07-23) showed the whole
+// matchup pivots on who is forced into reactive healing (losses: they land
+// 19 toxics and we burn 9.5 mons/game of recovery PP; wins: 23-18 the other
+// way and we spend 5.2). Priced only under stall-mode, symmetric: the search
+// chases toxing their recovery mons AND keeps ours clean.
+const TOXIC_ON_WALL: f32 = -48.0;
+
+fn has_self_recovery(pokemon: &Pokemon) -> bool {
+    for mv in pokemon.moves.into_iter() {
+        if mv.id == Choices::NONE {
+            continue;
+        }
+        if mv.id == Choices::REST
+            || mv
+                .choice
+                .heal
+                .as_ref()
+                .map_or(false, |h| h.target == MoveTarget::User)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn evaluate_poison(pokemon: &Pokemon, base_score: f32) -> f32 {
     match pokemon.ability {
         Abilities::POISONHEAL => {
@@ -799,7 +826,17 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
         PokemonStatus::FREEZE => score += POKEMON_FROZEN,
         PokemonStatus::SLEEP => score += POKEMON_ASLEEP,
         PokemonStatus::PARALYZE => score += POKEMON_PARALYZED,
-        PokemonStatus::TOXIC => score += evaluate_poison(pokemon, POKEMON_TOXIC),
+        PokemonStatus::TOXIC => {
+            let base = if stall_mode()
+                && !eval_off().baseline
+                && has_self_recovery(pokemon)
+            {
+                TOXIC_ON_WALL
+            } else {
+                POKEMON_TOXIC
+            };
+            score += evaluate_poison(pokemon, base);
+        }
         PokemonStatus::POISON => score += evaluate_poison(pokemon, POKEMON_POISONED),
         PokemonStatus::NONE => {}
     }
