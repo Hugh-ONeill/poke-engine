@@ -2,7 +2,7 @@ use super::abilities::Abilities;
 use super::damage_calc::type_effectiveness_modifier;
 use super::items::Items;
 use super::state::{PokemonVolatileStatus, Terrain, Weather};
-use crate::choices::{Choices, MoveCategory, MoveTarget};
+use crate::choices::{Choice, Choices, MoveCategory, MoveTarget};
 use crate::state::{Pokemon, PokemonStatus, PokemonType, Side, State};
 
 /// Runtime switch: `CB_EVAL_BASELINE=1` reverts evaluate() to the UPSTREAM
@@ -335,6 +335,28 @@ const SPEED_TIER_BONUS: f32 = 20.0;
 // — e.g. Liquidation vs full-HP Cresselia is "1.0 type-eff" but ~28% per hit, so the
 // real threat is ~0.56, not 1.0. Used to gate boost values, HOPELESS, and SPEED_TIER
 // so attackers stuck against walls don't accumulate phantom value.
+// Mirrors of the big ability_modify_attack_being_used BP hooks. Kept as cheap
+// constants because the real pipeline needs Choice clones + full hook dispatch
+// with state context — too heavy for the evaluate() hot path (~1M calls/s).
+// The parity test below runs the REAL pipeline against this mirror, so drift
+// fails `cargo test` instead of silently rotting.
+fn threat_ability_bp_mult(ability: &Abilities, choice: &Choice) -> f32 {
+    match ability {
+        Abilities::TECHNICIAN if choice.base_power <= 60.0 => 1.5,
+        Abilities::TOUGHCLAWS if choice.flags.contact => 1.3,
+        Abilities::SHARPNESS if choice.flags.slicing => 1.5,
+        Abilities::STRONGJAW if choice.flags.bite => 1.5,
+        Abilities::IRONFIST if choice.flags.punch => 1.2,
+        Abilities::SHEERFORCE if choice.secondaries.is_some() => 1.3,
+        Abilities::HUGEPOWER | Abilities::PUREPOWER
+            if choice.category == MoveCategory::Physical =>
+        {
+            2.0
+        }
+        _ => 1.0,
+    }
+}
+
 fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
     let mut best_phys: f32 = 0.0;
     let mut best_spec: f32 = 0.0;
@@ -378,30 +400,63 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
                 if mv.id == Choices::FACADE && statused {
                     bp *= 2.0;
                 }
-                let stab = if mv.choice.move_type == attacker.types.0
-                    || mv.choice.move_type == attacker.types.1 {
-                    1.5
+                let physical = mv.choice.category == MoveCategory::Physical;
+                let stab_match = mv.choice.move_type == attacker.types.0
+                    || mv.choice.move_type == attacker.types.1;
+                let stab = if stab_match {
+                    if attacker.ability == Abilities::ADAPTABILITY {
+                        2.0
+                    } else {
+                        1.5
+                    }
                 } else {
                     1.0
                 };
-                let (off, def) = if mv.choice.category == MoveCategory::Physical {
+                let (off, def) = if physical {
                     (atk_stat, def_stat)
                 } else {
                     (spa_stat, spd_stat)
                 };
                 // burn halves physical damage unless Guts (or Facade, which
                 // ignores the burn drop)
-                let burn_mult = if burned
-                    && mv.choice.category == MoveCategory::Physical
-                    && !guts
-                    && mv.id != Choices::FACADE
+                let burn_mult = if burned && physical && !guts && mv.id != Choices::FACADE
                 {
                     0.5
                 } else {
                     1.0
                 };
+                let abil_mult = threat_ability_bp_mult(&attacker.ability, &mv.choice);
+                let item_mult = match attacker.item {
+                    Items::CHOICEBAND if physical => 1.5,
+                    Items::CHOICESPECS if !physical => 1.5,
+                    Items::LIFEORB => 1.3,
+                    _ => 1.0,
+                };
+                let def_mult = match defender.ability {
+                    Abilities::THICKFAT
+                        if mv.choice.move_type == PokemonType::FIRE
+                            || mv.choice.move_type == PokemonType::ICE =>
+                    {
+                        0.5
+                    }
+                    Abilities::MULTISCALE | Abilities::SHADOWSHIELD
+                        if defender.hp == defender.maxhp =>
+                    {
+                        0.5
+                    }
+                    Abilities::FILTER | Abilities::SOLIDROCK | Abilities::PRISMARMOR
+                        if eff >= 2.0 =>
+                    {
+                        0.75
+                    }
+                    Abilities::ICESCALES if !physical => 0.5,
+                    _ => 1.0,
+                };
                 // Lv100 simplified damage: 0.84 * BP * (off/def) * STAB * type_eff
-                let dmg = 0.84 * bp * (off / def) * stab * eff * burn_mult;
+                let dmg = 0.84 * bp * (off / def) * stab * eff * burn_mult
+                    * abil_mult
+                    * item_mult
+                    * def_mult;
                 let frac = dmg / def_hp;
                 // 2HKO (50% per hit) → 1.0 threat; OHKO+ clamps at 1.0
                 let score = (frac / 0.5).min(1.0);
@@ -940,7 +995,53 @@ pub fn evaluate(state: &State) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::threat_ability_bp_mult;
+    use super::Abilities;
     use super::EvalOff;
+    use crate::choices::{Choice, Choices, MOVES};
+    use crate::state::{SideReference, State};
+
+    /// The threat_vs ability mirror must track the REAL
+    /// ability_modify_attack_being_used hooks: run each case through the real
+    /// pipeline and compare the base-power ratio to the mirrored constant.
+    #[test]
+    fn threat_ability_mults_match_real_pipeline() {
+        use super::super::abilities::ability_modify_attack_being_used;
+        let mut state = State::default();
+        let cases = [
+            (Abilities::TECHNICIAN, Choices::BULLETPUNCH), // <=60 BP -> 1.5
+            (Abilities::TECHNICIAN, Choices::CLOSECOMBAT), // >60 BP -> 1.0
+            (Abilities::TOUGHCLAWS, Choices::CLOSECOMBAT), // contact
+            (Abilities::TOUGHCLAWS, Choices::SHADOWBALL),  // non-contact
+            (Abilities::SHARPNESS, Choices::LEAFBLADE),
+            (Abilities::STRONGJAW, Choices::CRUNCH),
+            (Abilities::IRONFIST, Choices::DRAINPUNCH),
+            (Abilities::SHEERFORCE, Choices::IRONHEAD),
+            (Abilities::HUGEPOWER, Choices::CLOSECOMBAT),
+            (Abilities::PUREPOWER, Choices::SHADOWBALL), // special -> 1.0
+        ];
+        for (ability, move_id) in cases {
+            let base = MOVES.get(&move_id).unwrap().clone();
+            state.side_one.get_active().ability = ability;
+            let mut real = base.clone();
+            ability_modify_attack_being_used(
+                &state,
+                &mut real,
+                &Choice::default(),
+                &SideReference::SideOne,
+            );
+            let real_mult = real.base_power / base.base_power;
+            let mirror = threat_ability_bp_mult(&ability, &base);
+            assert!(
+                (real_mult - mirror).abs() < 1e-4,
+                "{:?} + {:?}: real pipeline {} vs threat mirror {}",
+                ability,
+                move_id,
+                real_mult,
+                mirror
+            );
+        }
+    }
 
     #[test]
     fn from_spec_parses_list_and_all() {
