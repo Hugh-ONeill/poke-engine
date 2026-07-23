@@ -37,12 +37,24 @@ struct EvalOff {
     poisonheal: bool,
     pp: bool,
     synergy: bool,
+    threatv2: bool,
 }
 
 impl EvalOff {
-    fn from_spec(all: bool, list: &str) -> Self {
+    /// `list` (CB_EVAL_OFF) disables default-ON terms; `on_list` (CB_EVAL_ON)
+    /// enables default-OFF experimental terms. synergy + threatv2 are
+    /// default-OFF since 2026-07-23: syngate/syniso both accept-h0 at gates
+    /// centered on the certified 45.7% level — not proof of regression (that
+    /// geometry is a coin flip at level strength), but the burden of proof
+    /// sits with the new terms and they haven't met it.
+    fn from_spec(all: bool, list: &str, on_list: &str) -> Self {
         let has =
             |k: &str| all || list.split(',').any(|t| t.trim().eq_ignore_ascii_case(k));
+        let has_on = |k: &str| {
+            !all && on_list
+                .split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case(k))
+        };
         EvalOff {
             hazards: has("hazards"),
             items: has("items"),
@@ -56,7 +68,8 @@ impl EvalOff {
             speedtier: has("speedtier"),
             poisonheal: has("poisonheal"),
             pp: has("pp"),
-            synergy: has("synergy"),
+            synergy: !has_on("synergy"),
+            threatv2: !has_on("threatv2"),
         }
     }
 }
@@ -68,7 +81,8 @@ fn eval_off() -> &'static EvalOff {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let list = std::env::var("CB_EVAL_OFF").unwrap_or_default();
-        EvalOff::from_spec(all, &list)
+        let on_list = std::env::var("CB_EVAL_ON").unwrap_or_default();
+        EvalOff::from_spec(all, &list, &on_list)
     })
 }
 
@@ -378,12 +392,14 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
     // statused — without this a Flame Orb Ursaluna reads as half its real
     // threat and a burned wall-breaker as double. threat_vs is fork-only, so
     // the threat knob already reverts all of it.
-    let statused = attacker.status != PokemonStatus::NONE;
-    let burned = attacker.status == PokemonStatus::BURN;
-    let poisoned = matches!(
-        attacker.status,
-        PokemonStatus::POISON | PokemonStatus::TOXIC
-    );
+    let v2 = !eval_off().threatv2;
+    let statused = v2 && attacker.status != PokemonStatus::NONE;
+    let burned = v2 && attacker.status == PokemonStatus::BURN;
+    let poisoned = v2
+        && matches!(
+            attacker.status,
+            PokemonStatus::POISON | PokemonStatus::TOXIC
+        );
     let guts = attacker.ability == Abilities::GUTS && statused;
     let atk_mult = if guts || (poisoned && attacker.ability == Abilities::TOXICBOOST)
     {
@@ -406,7 +422,11 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
         match mv.choice.category {
             MoveCategory::Physical | MoveCategory::Special => {
                 if eff == 0.0 { continue; }
-                let eff = eff * threat_eff_adjust(&attacker.ability, eff);
+                let eff = if v2 {
+                    eff * threat_eff_adjust(&attacker.ability, eff)
+                } else {
+                    eff
+                };
                 let mut bp = mv.choice.base_power;
                 if bp == 0.0 { continue; }
                 if mv.id == Choices::FACADE && statused {
@@ -416,7 +436,7 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
                 let stab_match = mv.choice.move_type == attacker.types.0
                     || mv.choice.move_type == attacker.types.1;
                 let stab = if stab_match {
-                    if attacker.ability == Abilities::ADAPTABILITY {
+                    if v2 && attacker.ability == Abilities::ADAPTABILITY {
                         2.0
                     } else {
                         1.5
@@ -437,15 +457,19 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
                 } else {
                     1.0
                 };
-                let abil_mult = threat_ability_bp_mult(&attacker.ability, &mv.choice);
-                let item_mult = match attacker.item {
+                let abil_mult = if v2 {
+                    threat_ability_bp_mult(&attacker.ability, &mv.choice)
+                } else {
+                    1.0
+                };
+                let item_mult = if !v2 { 1.0 } else { match attacker.item {
                     Items::CHOICEBAND if physical => 1.5,
                     Items::CHOICESPECS if !physical => 1.5,
                     Items::LIFEORB => 1.3,
                     Items::EXPERTBELT if eff > 1.0 => 1.2,
                     _ => 1.0,
-                };
-                let def_mult = match defender.ability {
+                } };
+                let def_mult = if !v2 { 1.0 } else { match defender.ability {
                     Abilities::THICKFAT
                         if mv.choice.move_type == PokemonType::FIRE
                             || mv.choice.move_type == PokemonType::ICE =>
@@ -464,7 +488,7 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
                     }
                     Abilities::ICESCALES if !physical => 0.5,
                     _ => 1.0,
-                };
+                } };
                 // Lv100 simplified damage: 0.84 * BP * (off/def) * STAB * type_eff
                 let dmg = 0.84 * bp * (off / def) * stab * eff * burn_mult
                     * abil_mult
@@ -1092,20 +1116,23 @@ mod tests {
 
     #[test]
     fn from_spec_parses_list_and_all() {
-        let off = EvalOff::from_spec(false, "hazards, HOPELESS");
+        let off = EvalOff::from_spec(false, "hazards, HOPELESS", "");
         assert!(off.hazards && off.hopeless);
         assert!(!off.threat && !off.items && !off.tera && !off.speedtier);
         assert!(!off.poisonheal && !off.pp);
-        let all = EvalOff::from_spec(true, "");
+        let all = EvalOff::from_spec(true, "", "synergy,threatv2");
         assert!(all.hazards && all.items && all.volatiles && all.threat
             && all.tera && all.pending && all.weather && all.terrain
             && all.hopeless && all.speedtier && all.poisonheal && all.pp);
-        let none = EvalOff::from_spec(false, "");
+        // baseline forces experimental terms off even when CB_EVAL_ON lists them
+        assert!(all.synergy && all.threatv2);
+        let none = EvalOff::from_spec(false, "", "");
         assert!(!none.hazards && !none.hopeless && !none.volatiles);
-        let ph = EvalOff::from_spec(false, "poisonheal,pp");
-        assert!(ph.poisonheal && ph.pp && !ph.hazards && !ph.synergy);
-        let sy = EvalOff::from_spec(false, "synergy");
-        assert!(sy.synergy && !sy.poisonheal && !sy.pp);
-        assert!(EvalOff::from_spec(true, "").synergy);
+        // default-OFF experimental terms: disabled unless CB_EVAL_ON enables
+        assert!(none.synergy && none.threatv2);
+        let on = EvalOff::from_spec(false, "", "synergy, THREATV2");
+        assert!(!on.synergy && !on.threatv2 && !on.hazards);
+        let ph = EvalOff::from_spec(false, "poisonheal,pp", "");
+        assert!(ph.poisonheal && ph.pp && !ph.hazards && ph.synergy);
     }
 }
