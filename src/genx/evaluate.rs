@@ -108,8 +108,14 @@ const SAFE_GUARD: f32 = 5.0;
 const TAILWIND: f32 = 7.0;
 const HEALING_WISH: f32 = 30.0;
 
-const STEALTH_ROCK: f32 = -15.0;
-const SPIKES: f32 = -9.0;
+// Retuned to upstream's values 2026-07-23: the -15/-9 monotype tuning was
+// never validated for OU, and the position instrument showed it drives the
+// janitor churn — 10.4% of decisions flip when it's reverted (vs a 5.2%
+// noise floor), with the signature "T1 stealth rock -> attack, fewer
+// switches, more attacks". This makes the CB_EVAL_OFF=hazards knob inert
+// (main == base) until someone retunes again.
+const STEALTH_ROCK: f32 = -10.0;
+const SPIKES: f32 = -7.0;
 // upstream v0.0.47 values, used under CB_EVAL_BASELINE
 const STEALTH_ROCK_BASE: f32 = -10.0;
 const SPIKES_BASE: f32 = -7.0;
