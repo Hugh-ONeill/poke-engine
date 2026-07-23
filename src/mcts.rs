@@ -13,6 +13,26 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-0.0125 * x).exp())
 }
 
+/// Switch-tempo tax (fork, 2026-07-23): flat Q penalty on SIDE-ONE switch
+/// options during selection, expressed via CB_SWITCH_TAX in EVAL POINTS and
+/// converted at the sigmoid slope (0.0125/4 Q-units per point). WHY: four
+/// independent measurements indict our switch churn vs foul-play (25.3 vs
+/// 20.6 hard switches/100; 6.4% vs 4.6% died-on-switch-in; +23-28% entries
+/// hazard surcharge in every stall-breadth arm; 68% vs 59% hazard restick).
+/// The sim already charges each switch's mechanical cost — this prices the
+/// residual tempo/predictability cost the eval cannot see, only for OUR side
+/// (taxing side two would corrupt the opponent model). 0 (default) = off.
+fn switch_tax_q() -> f32 {
+    static TAX: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *TAX.get_or_init(|| {
+        std::env::var("CB_SWITCH_TAX")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .map(|points| points * 0.0125 / 4.0)
+            .unwrap_or(0.0)
+    })
+}
+
 /// Standard logistic, no built-in scale. Used for converting net logits to
 /// probabilities in the root-relative leaf path.
 fn sigmoid_std(x: f32) -> f32 {
@@ -122,15 +142,23 @@ impl Node {
         self.s2_options = Some(s2_options_vec);
     }
 
-    pub fn maximize_ucb_for_side(&self, side_map: &[MoveNode], use_priors: bool) -> usize {
+    pub fn maximize_ucb_for_side(
+        &self,
+        side_map: &[MoveNode],
+        use_priors: bool,
+        switch_tax: f32,
+    ) -> usize {
         let mut choice = 0;
         let mut best_score = f32::MIN;
         for (index, node) in side_map.iter().enumerate() {
-            let score = if use_priors {
+            let mut score = if use_priors {
                 node.puct(self.times_visited)
             } else {
                 node.ucb1(self.times_visited)
             };
+            if switch_tax != 0.0 && matches!(node.move_choice, MoveChoice::Switch(_)) {
+                score -= switch_tax;
+            }
             if score > best_score {
                 best_score = score;
                 choice = index;
@@ -151,8 +179,10 @@ impl Node {
         }
 
         let use_p = self.use_priors;
-        let s1_mc_index = self.maximize_ucb_for_side(&self.s1_options.as_ref().unwrap(), use_p);
-        let s2_mc_index = self.maximize_ucb_for_side(&self.s2_options.as_ref().unwrap(), use_p);
+        let s1_mc_index =
+            self.maximize_ucb_for_side(&self.s1_options.as_ref().unwrap(), use_p, switch_tax_q());
+        let s2_mc_index =
+            self.maximize_ucb_for_side(&self.s2_options.as_ref().unwrap(), use_p, 0.0);
         let child_vector = self.children.get_mut(&(s1_mc_index, s2_mc_index));
         match child_vector {
             Some(child_vector) => {
@@ -272,8 +302,10 @@ impl Node {
         }
 
         let use_p = self.use_priors;
-        let s1_mc_index = self.maximize_ucb_for_side(self.s1_options.as_ref().unwrap(), use_p);
-        let s2_mc_index = self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap(), use_p);
+        let s1_mc_index =
+            self.maximize_ucb_for_side(self.s1_options.as_ref().unwrap(), use_p, switch_tax_q());
+        let s2_mc_index =
+            self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap(), use_p, 0.0);
 
         // Apply virtual loss to the selected moves at this node.
         self.s1_options.as_mut().unwrap()[s1_mc_index].pending_visits += 1;
@@ -1212,5 +1244,42 @@ impl PersistentMcts {
         };
         self.last_advance = Some(report.clone());
         report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::PokemonIndex;
+
+    fn mv(choice: MoveChoice, total: f32, visits: u32) -> MoveNode {
+        MoveNode {
+            move_choice: choice,
+            total_score: total,
+            visits,
+            prior: 0.25,
+            pending_visits: 0,
+        }
+    }
+
+    /// A Q-tied switch must lose selection to an attack under the tax, and
+    /// win it back when the tax is off or when its Q edge exceeds the tax.
+    #[test]
+    fn switch_tax_breaks_ties_away_from_switches() {
+        let mut node = Node::new();
+        node.times_visited = 200;
+        let map = [
+            mv(MoveChoice::Move(crate::state::PokemonMoveIndex::M0), 50.0, 100),
+            mv(MoveChoice::Switch(PokemonIndex::P1), 50.0, 100),
+        ];
+        assert_eq!(node.maximize_ucb_for_side(&map, false, 0.02), 0);
+        assert_eq!(node.maximize_ucb_for_side(&map, false, 0.0), 0); // tie -> first
+        node.times_visited = 200;
+        let map2 = [
+            mv(MoveChoice::Move(crate::state::PokemonMoveIndex::M0), 50.0, 100),
+            mv(MoveChoice::Switch(PokemonIndex::P1), 55.0, 100), // Q edge 0.05
+        ];
+        assert_eq!(node.maximize_ucb_for_side(&map2, false, 0.02), 1);
+        assert_eq!(node.maximize_ucb_for_side(&map2, false, 0.10), 0);
     }
 }
