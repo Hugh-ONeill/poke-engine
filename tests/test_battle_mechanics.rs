@@ -21859,3 +21859,246 @@ fn test_safety_goggles_blocks_spore() {
     }];
     assert_eq!(expected_instructions, vec_of_instructions);
 }
+
+#[test]
+fn test_eject_button_forces_holder_out_and_drops_its_move() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_two.get_active().item = Items::EJECTBUTTON;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::TACKLE,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![
+            Instruction::Damage(DamageInstruction {
+                side_ref: SideReference::SideTwo,
+                damage_amount: 48,
+            }),
+            Instruction::ChangeItem(ChangeItemInstruction {
+                side_ref: SideReference::SideTwo,
+                current_item: Items::EJECTBUTTON,
+                new_item: Items::NONE,
+            }),
+            Instruction::ToggleSideTwoForceSwitch,
+        ],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_red_card_forces_attacker_out() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_two.get_active().item = Items::REDCARD;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::TACKLE,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![
+            Instruction::Damage(DamageInstruction {
+                side_ref: SideReference::SideTwo,
+                damage_amount: 48,
+            }),
+            Instruction::ChangeItem(ChangeItemInstruction {
+                side_ref: SideReference::SideTwo,
+                current_item: Items::REDCARD,
+                new_item: Items::NONE,
+            }),
+            Instruction::ToggleSideOneForceSwitch,
+            // the holder had not moved yet: its move defers via the saved
+            // slot and replays after the dragged attacker's replacement
+            Instruction::SetSideTwoMoveSecondSwitchOutMove(
+                SetSecondMoveSwitchOutMoveInstruction {
+                    new_choice: Choices::SPLASH,
+                    previous_choice: Choices::NONE,
+                },
+            ),
+        ],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_eject_pack_fires_on_stat_drop() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_two.get_active().item = Items::EJECTPACK;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::GROWL,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![
+            Instruction::ChangeItem(ChangeItemInstruction {
+                side_ref: SideReference::SideTwo,
+                current_item: Items::EJECTPACK,
+                new_item: Items::NONE,
+            }),
+            Instruction::ToggleSideTwoForceSwitch,
+            Instruction::Boost(BoostInstruction {
+                side_ref: SideReference::SideTwo,
+                stat: PokemonBoostableStat::Attack,
+                amount: -1,
+            }),
+        ],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_leppa_berry_restores_pp_on_hitting_zero() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_one.get_active().item = Items::LEPPABERRY;
+    state.side_one.get_active().replace_move(PokemonMoveIndex::M0, Choices::SPLASH);
+    state.side_one.get_active().moves[&PokemonMoveIndex::M0].pp = 1;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::SPLASH,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![
+            Instruction::DecrementPP(DecrementPPInstruction {
+                side_ref: SideReference::SideOne,
+                move_index: PokemonMoveIndex::M0,
+                amount: 1,
+            }),
+            Instruction::DecrementPP(DecrementPPInstruction {
+                side_ref: SideReference::SideOne,
+                move_index: PokemonMoveIndex::M0,
+                amount: -10,
+            }),
+            Instruction::ChangeItem(ChangeItemInstruction {
+                side_ref: SideReference::SideOne,
+                current_item: Items::LEPPABERRY,
+                new_item: Items::NONE,
+            }),
+        ],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_aguav_berry_heals_third_at_quarter_hp() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_one.get_active().item = Items::AGUAVBERRY;
+    state.side_one.get_active().hp = 20;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::SPLASH,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![
+            Instruction::Heal(HealInstruction {
+                side_ref: SideReference::SideOne,
+                heal_amount: 33,
+            }),
+            Instruction::ChangeItem(ChangeItemInstruction {
+                side_ref: SideReference::SideOne,
+                current_item: Items::AGUAVBERRY,
+                new_item: Items::NONE,
+            }),
+        ],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_lagging_tail_holder_moves_last() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_one.get_active().item = Items::LAGGINGTAIL;
+    state.side_one.get_active().hp = 500;
+    state.side_one.get_active().maxhp = 500;
+    state.side_two.get_active().hp = 500;
+    state.side_two.get_active().maxhp = 500;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::TACKLE,
+        Choices::TACKLE,
+    );
+
+    // the faster lagging-tail holder still moves SECOND: side_two's damage
+    // to side_one lands first
+    let first = &vec_of_instructions[0].instruction_list[0];
+    match first {
+        Instruction::Damage(d) => assert_eq!(d.side_ref, SideReference::SideOne),
+        other => panic!("expected damage first, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_mental_herb_blocks_taunt() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_two.get_active().item = Items::MENTALHERB;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::TAUNT,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![Instruction::ChangeItem(ChangeItemInstruction {
+            side_ref: SideReference::SideTwo,
+            current_item: Items::MENTALHERB,
+            new_item: Items::NONE,
+        })],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_ring_target_removes_type_immunity() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_two.get_active().types = (PokemonType::GHOST, PokemonType::TYPELESS);
+    state.side_two.get_active().item = Items::RINGTARGET;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::TACKLE,
+        Choices::SPLASH,
+    );
+
+    // normal-type Tackle hits the Ghost holder at neutral effectiveness
+    let first = &vec_of_instructions[0].instruction_list[0];
+    match first {
+        Instruction::Damage(d) => assert_eq!(d.side_ref, SideReference::SideTwo),
+        other => panic!("expected damage, got {:?}", other),
+    }
+}

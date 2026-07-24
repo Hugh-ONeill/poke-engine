@@ -28,8 +28,8 @@ use crate::instruction::{DecrementPPInstruction, SetLastUsedMoveInstruction};
 use super::damage_calc::calculate_futuresight_damage;
 use super::damage_calc::{calculate_damage, type_effectiveness_modifier, DamageRolls};
 use super::items::{
-    item_before_move, item_end_of_turn, item_modify_attack_against, item_modify_attack_being_used,
-    item_on_switch_in, screen_set_turns, Items,
+    item_after_damage_hit, item_before_move, item_end_of_turn, item_modify_attack_against,
+    item_modify_attack_being_used, item_on_switch_in, screen_set_turns, Items,
 };
 use super::state::{MoveChoice, PokemonVolatileStatus, Terrain, Weather};
 use crate::choices::{Choice, MoveCategory};
@@ -615,6 +615,35 @@ fn get_instructions_from_volatile_statuses(
         return;
     }
     let side = state.get_side(&target_side);
+    // Mental Herb: consumed to shrug off the mental-lock volatiles;
+    // Ability Shield: Gastro Acid has no effect (shield not consumed)
+    let affected_item = side.get_active_immutable().item;
+    if volatile_status.target == MoveTarget::Opponent
+        && affected_item == Items::MENTALHERB
+        && matches!(
+            volatile_status.volatile_status,
+            PokemonVolatileStatus::TAUNT
+                | PokemonVolatileStatus::ENCORE
+                | PokemonVolatileStatus::DISABLE
+                | PokemonVolatileStatus::TORMENT
+                | PokemonVolatileStatus::ATTRACT
+        )
+    {
+        side.get_active().item = Items::NONE;
+        incoming_instructions
+            .instruction_list
+            .push(Instruction::ChangeItem(ChangeItemInstruction {
+                side_ref: target_side,
+                current_item: Items::MENTALHERB,
+                new_item: Items::NONE,
+            }));
+        return;
+    }
+    if volatile_status.volatile_status == PokemonVolatileStatus::GASTROACID
+        && affected_item == Items::ABILITYSHIELD
+    {
+        return;
+    }
     let affected_pkmn = side.get_active_immutable();
     if affected_pkmn.volatile_status_can_be_applied(
         &volatile_status.volatile_status,
@@ -871,6 +900,30 @@ pub fn apply_boost_instruction(
         boost_amount = get_boost_amount(target_side, &stat, boost_amount);
         if boost_amount != 0 {
             boost_was_applied = true;
+            // Eject Pack: any realized stat drop sends the holder out (its
+            // unmoved move is dropped by the own-side force-switch guard,
+            // matching Showdown). Single choke point catches move drops,
+            // secondaries, and Intimidate alike.
+            if boost_amount < 0
+                && target_side.get_active_immutable().item == Items::EJECTPACK
+                && !target_side.force_switch
+                && target_side.get_active_immutable().hp > 0
+                && target_side.visible_alive_pkmn() > 1
+            {
+                target_side.get_active().item = Items::NONE;
+                instructions
+                    .instruction_list
+                    .push(Instruction::ChangeItem(ChangeItemInstruction {
+                        side_ref: *target_side_ref,
+                        current_item: Items::EJECTPACK,
+                        new_item: Items::NONE,
+                    }));
+                target_side.force_switch = true;
+                instructions.instruction_list.push(match target_side_ref {
+                    SideReference::SideOne => Instruction::ToggleSideOneForceSwitch,
+                    SideReference::SideTwo => Instruction::ToggleSideTwoForceSwitch,
+                });
+            }
             match stat {
                 PokemonBoostableStat::Attack => target_side.attack_boost += boost_amount,
                 PokemonBoostableStat::Defense => target_side.defense_boost += boost_amount,
@@ -1469,6 +1522,12 @@ fn generate_instructions_from_damage(
 
         let attacking_pokemon = state.get_side(attacking_side_ref).get_active();
         if let Some(drain_fraction) = choice.drain {
+            // Big Root: drained heals are 30% larger
+            let drain_fraction = if attacking_pokemon.item == Items::BIGROOT {
+                drain_fraction * 1.3
+            } else {
+                drain_fraction
+            };
             let drain_amount = (damage_dealt as f32 * drain_fraction) as i16;
             let heal_amount =
                 cmp::min(drain_amount, attacking_pokemon.maxhp - attacking_pokemon.hp);
@@ -1497,6 +1556,13 @@ fn generate_instructions_from_damage(
                 .instruction_list
                 .push(recoil_instruction);
         }
+        item_after_damage_hit(
+            &mut state,
+            attacking_side_ref,
+            damage_dealt,
+            hit_sub,
+            &mut incoming_instructions,
+        );
         choice_after_damage_hit(
             &mut state,
             &choice,
@@ -2158,9 +2224,41 @@ pub fn generate_instructions_from_move(
             .get_side(&attacking_side.get_other_side())
             .force_switch
     {
-        state
-            .get_side(&attacking_side)
-            .switch_out_move_second_saved_move = choice.move_id;
+        // save via instruction, not raw mutation: pivot flows already set the
+        // slot by instruction (making this write idempotent there), but the
+        // Red Card path reaches here with the slot unset, and a raw write
+        // survives instruction reversal — caught by the state-restoration
+        // check when Red Card mechanics landed (2026-07-24)
+        let side = state.get_side(&attacking_side);
+        if side.switch_out_move_second_saved_move != choice.move_id {
+            // pivot flows already set the slot (by instruction) before this
+            // guard runs, so only the Red Card path takes this branch
+            let ins = match attacking_side {
+                SideReference::SideOne => Instruction::SetSideOneMoveSecondSwitchOutMove(
+                    SetSecondMoveSwitchOutMoveInstruction {
+                        new_choice: choice.move_id,
+                        previous_choice: side.switch_out_move_second_saved_move,
+                    },
+                ),
+                SideReference::SideTwo => Instruction::SetSideTwoMoveSecondSwitchOutMove(
+                    SetSecondMoveSwitchOutMoveInstruction {
+                        new_choice: choice.move_id,
+                        previous_choice: side.switch_out_move_second_saved_move,
+                    },
+                ),
+            };
+            side.switch_out_move_second_saved_move = choice.move_id;
+            incoming_instructions.instruction_list.push(ins);
+        }
+        state.reverse_instructions(&incoming_instructions.instruction_list);
+        final_instructions.push(incoming_instructions);
+        return;
+    }
+
+    // Own side being forced out mid-turn (Eject Button / Eject Pack fired
+    // on the first move): the holder switches before acting and its move is
+    // LOST, not deferred — Showdown semantics.
+    if !choice.first_move && state.get_side(&attacking_side).force_switch {
         state.reverse_instructions(&incoming_instructions.instruction_list);
         final_instructions.push(incoming_instructions);
         return;
@@ -2240,6 +2338,25 @@ pub fn generate_instructions_from_move(
                 amount: pp_decrement_amount,
             }));
         active.moves[&choice.move_index].pp -= pp_decrement_amount;
+        // Leppa Berry: restore 10 PP to the move that just hit zero
+        if active.moves[&choice.move_index].pp <= 0 && active.item == Items::LEPPABERRY {
+            incoming_instructions
+                .instruction_list
+                .push(Instruction::DecrementPP(DecrementPPInstruction {
+                    side_ref: attacking_side,
+                    move_index: choice.move_index,
+                    amount: -10,
+                }));
+            active.moves[&choice.move_index].pp += 10;
+            active.item = Items::NONE;
+            incoming_instructions
+                .instruction_list
+                .push(Instruction::ChangeItem(ChangeItemInstruction {
+                    side_ref: attacking_side,
+                    current_item: Items::LEPPABERRY,
+                    new_item: Items::NONE,
+                }));
+        }
     }
 
     if !choice.sleep_talk_move {
@@ -2606,6 +2723,15 @@ fn moves_first(
                     current_item: Items::CUSTAPBERRY,
                 }));
             return SideMovesFirst::SideTwo;
+        }
+
+        // Lagging Tail: holder moves last within its priority bracket
+        let s1_tail = side_one_active.item == Items::LAGGINGTAIL;
+        let s2_tail = side_two_active.item == Items::LAGGINGTAIL;
+        if s1_tail && !s2_tail {
+            return SideMovesFirst::SideTwo;
+        } else if s2_tail && !s1_tail {
+            return SideMovesFirst::SideOne;
         }
 
         if side_one_effective_speed == side_two_effective_speed {
@@ -3648,7 +3774,10 @@ fn run_move(
     // Only entered if the move causes a switch-out
     // U-turn, Volt Switch, Baton Pass, etc.
     // This deals with a bunch of flags that are required for the next turn to run properly
-    if choice.flags.pivot {
+    if choice.flags.pivot
+        && !state.side_one.force_switch
+        && !state.side_two.force_switch
+    {
         match attacking_side {
             SideReference::SideOne => {
                 if state.side_one.visible_alive_pkmn() > 1 {

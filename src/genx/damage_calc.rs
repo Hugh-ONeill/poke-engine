@@ -104,7 +104,13 @@ pub fn type_effectiveness_modifier(attacking_type: &PokemonType, defender: &Poke
     } else {
         defender.types
     };
-    _type_effectiveness_modifier(attacking_type, &defending_types)
+    let modifier = _type_effectiveness_modifier(attacking_type, &defending_types);
+    // Ring Target: type-based immunities are ignored (0x becomes 1x); the
+    // holder's other type matchups are unchanged
+    if modifier == 0.0 && defender.item == super::items::Items::RINGTARGET {
+        return 1.0;
+    }
+    modifier
 }
 
 fn _type_effectiveness_modifier(
@@ -567,7 +573,12 @@ fn common_pkmn_damage_calc(
     if defender.terastallized && choice.move_type == PokemonType::STELLAR {
         damage_modifier *= 2.0;
     } else {
-        damage_modifier *= _type_effectiveness_modifier(&choice.move_type, &defender_types);
+        let mut eff = _type_effectiveness_modifier(&choice.move_type, &defender_types);
+        // Ring Target: type-based immunities are ignored (0x becomes 1x)
+        if eff == 0.0 && defender.item == super::items::Items::RINGTARGET {
+            eff = 1.0;
+        }
+        damage_modifier *= eff;
     }
 
     if attacker.ability != Abilities::CLOUDNINE

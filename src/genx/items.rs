@@ -734,6 +734,14 @@ pub fn item_before_move(
         Items::SITRUSBERRY if active_pkmn.hp <= active_pkmn.maxhp / 4 => {
             sitrus_berry(side_ref, attacking_side, instructions)
         }
+        Items::AGUAVBERRY | Items::FIGYBERRY | Items::IAPAPABERRY
+            if active_pkmn.hp <= active_pkmn.maxhp / 4
+                || (active_pkmn.ability == Abilities::GLUTTONY
+                    && active_pkmn.hp <= active_pkmn.maxhp / 2) =>
+        {
+            let berry = active_pkmn.item;
+            pinch_berry(side_ref, attacking_side, berry, instructions)
+        }
         Items::CHESTOBERRY if active_pkmn.status == PokemonStatus::SLEEP => {
             chesto_berry(side_ref, attacking_side, instructions)
         }
@@ -1774,5 +1782,105 @@ pub fn screen_set_turns(setter: &Pokemon) -> i8 {
         8
     } else {
         5
+    }
+}
+
+// Pinch berries (Aguav/Figy/Iapapa): 1/3 max HP at or below 1/4 (1/2 with
+// Gluttony), item consumed. Confusion for a disagreeing nature is not
+// modeled — set-level nature data is exactly what the holder picked the
+// berry for, so the heal is the load-bearing part.
+fn pinch_berry(
+    side_ref: &SideReference,
+    attacking_side: &mut Side,
+    berry: Items,
+    instructions: &mut StateInstructions,
+) {
+    let active_pkmn = attacking_side.get_active();
+    let heal_amount = cmp::min(active_pkmn.maxhp / 3, active_pkmn.maxhp - active_pkmn.hp);
+    instructions
+        .instruction_list
+        .push(Instruction::Heal(HealInstruction {
+            side_ref: *side_ref,
+            heal_amount,
+        }));
+    active_pkmn.hp += heal_amount;
+    instructions
+        .instruction_list
+        .push(Instruction::ChangeItem(ChangeItemInstruction {
+            side_ref: *side_ref,
+            current_item: berry,
+            new_item: Items::NONE,
+        }));
+    active_pkmn.item = Items::NONE;
+}
+
+/// Defender-side items that react to being hit by a damaging move. Called
+/// once per damaging hit, after ability_after_damage_hit, never through a
+/// substitute. The saved-move machinery needs NO handling here: the engine's
+/// second-move guards already defer (Red Card holder's pending move) or drop
+/// (ejected holder's pending move) correctly once force_switch is set.
+pub fn item_after_damage_hit(
+    state: &mut State,
+    attacking_side_ref: &SideReference,
+    damage_dealt: i16,
+    hit_sub: bool,
+    instructions: &mut StateInstructions,
+) {
+    let defending_side_ref = attacking_side_ref.get_other_side();
+    let (attacking_side, defending_side) = state.get_both_sides(attacking_side_ref);
+    if damage_dealt <= 0
+        || hit_sub
+        || attacking_side.force_switch
+        || defending_side.force_switch
+    {
+        return;
+    }
+    match defending_side.get_active_immutable().item {
+        Items::EJECTBUTTON => {
+            if defending_side.get_active_immutable().hp > 0
+                && defending_side.visible_alive_pkmn() > 1
+            {
+                let defender = defending_side.get_active();
+                defender.item = Items::NONE;
+                instructions
+                    .instruction_list
+                    .push(Instruction::ChangeItem(ChangeItemInstruction {
+                        side_ref: defending_side_ref,
+                        current_item: Items::EJECTBUTTON,
+                        new_item: Items::NONE,
+                    }));
+                defending_side.force_switch = true;
+                instructions.instruction_list.push(match defending_side_ref {
+                    SideReference::SideOne => Instruction::ToggleSideOneForceSwitch,
+                    SideReference::SideTwo => Instruction::ToggleSideTwoForceSwitch,
+                });
+            }
+        }
+        Items::REDCARD => {
+            // SIMPLIFICATION: the dragged attacker CHOOSES its replacement;
+            // real mechanics drag a random reserve. This reuses the pivot
+            // force-switch machinery instead of mid-flow drag branching, at
+            // the cost of a slight bias in the dragged side's favor.
+            if defending_side.get_active_immutable().hp > 0
+                && attacking_side.get_active_immutable().hp > 0
+                && attacking_side.visible_alive_pkmn() > 1
+            {
+                let defender = defending_side.get_active();
+                defender.item = Items::NONE;
+                instructions
+                    .instruction_list
+                    .push(Instruction::ChangeItem(ChangeItemInstruction {
+                        side_ref: defending_side_ref,
+                        current_item: Items::REDCARD,
+                        new_item: Items::NONE,
+                    }));
+                attacking_side.force_switch = true;
+                instructions.instruction_list.push(match attacking_side_ref {
+                    SideReference::SideOne => Instruction::ToggleSideOneForceSwitch,
+                    SideReference::SideTwo => Instruction::ToggleSideTwoForceSwitch,
+                });
+            }
+        }
+        _ => {}
     }
 }
