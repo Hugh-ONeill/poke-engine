@@ -73,13 +73,15 @@ impl EvalOff {
             pp: has("pp"),
             synergy: has("synergy"),
             threatv2: !has_on("threatv2"),
-            // locks parked 2026-07-23 night: locknr suite gate accept-h0
-            // (llr -3.338, 32.5%/234) through a gate tilted TOWARD acceptance
-            // — the choice-on-wall liability likely over-sweeps legitimate
-            // scarf holders. The TWave-lock breaking itself was verified
-            // (max run 27 -> <13); revisit as locked-into-status ONLY, or
-            // with the liability narrowed to walls with zero usable attacks.
-            locks: !has_on("locks"),
+            // locks un-parked 2026-07-24: the locknr accept-h0 that parked
+            // them was the Jul-23 level step wearing a verdict costume — the
+            // interleaved paired retest (locksab, 229 same-team pairs,
+            // confound-proof) REFUTED the harm hypothesis: locks arm 31.4%
+            // vs baseline 26.6%, 55.9% of discordant pairs (a positive lean;
+            // not-worse is decisive). Truth terms default on; CB_EVAL_OFF=locks
+            // disables. The TWave-lock breaking was verified all along
+            // (max consecutive run 27 -> <13, fp control unchanged).
+            locks: has("locks"),
             baseline: all,
         }
     }
@@ -1287,11 +1289,12 @@ mod tests {
         // baseline forces everything off, even CB_EVAL_ON-listed terms
         assert!(all.synergy && all.threatv2);
         let none = EvalOff::from_spec(false, "", "");
-        // synergy default-ON (truth claims); threatv2 default-OFF (parked)
-        assert!(!none.synergy && none.threatv2);
+        // synergy + locks default-ON (truth claims); threatv2 default-OFF
+        // (parked). Locks un-parked 2026-07-24 after the locksab retest.
+        assert!(!none.synergy && !none.locks && none.threatv2);
         assert!(!none.hazards && !none.hopeless && !none.volatiles);
-        let sy_off = EvalOff::from_spec(false, "synergy", "THREATV2");
-        assert!(sy_off.synergy && !sy_off.threatv2 && !sy_off.hazards);
+        let sy_off = EvalOff::from_spec(false, "synergy,locks", "THREATV2");
+        assert!(sy_off.synergy && sy_off.locks && !sy_off.threatv2 && !sy_off.hazards);
         let ph = EvalOff::from_spec(false, "poisonheal,pp", "");
         assert!(ph.poisonheal && ph.pp && !ph.hazards && !ph.synergy);
         assert!(!ph.baseline && EvalOff::from_spec(true, "", "").baseline);
