@@ -1,7 +1,8 @@
 use super::abilities::Abilities;
 use super::choice_effects::charge_volatile_to_choice;
+use super::generate_instructions::immune_to_status;
 use super::items::Items;
-use crate::choices::{Choices, MoveCategory};
+use crate::choices::{Choice, Choices, MoveCategory, MoveTarget};
 use crate::define_enum_with_from_str;
 use crate::instruction::BoostInstruction;
 use crate::instruction::{
@@ -830,6 +831,14 @@ impl Side {
     }
 }
 
+/// CB_BEST_USEFUL=1 enables the root no-op option filter (side-one only).
+fn best_useful_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("CB_BEST_USEFUL").map_or(false, |v| v == "1" || v == "true")
+    })
+}
+
 impl State {
     pub fn root_get_all_options(&self) -> (Vec<MoveChoice>, Vec<MoveChoice>) {
         if self.team_preview {
@@ -905,6 +914,10 @@ impl State {
             );
         }
 
+        if best_useful_enabled() {
+            self.filter_side_one_noop_moves(&mut s1_options);
+        }
+
         if s1_options.len() == 0 {
             s1_options.push(MoveChoice::None);
         }
@@ -913,6 +926,129 @@ impl State {
         }
 
         (s1_options, s2_options)
+    }
+
+    /// Drop side-one move options that are strict no-ops: moves the engine
+    /// itself would resolve to "nothing happens" against every alive opponent
+    /// and every response. In a flat position such a move's subtree is the
+    /// best line delayed one tempo, indistinguishable to the eval, so MCTS
+    /// soaks root visits on it. Three provable classes only:
+    ///   - re-setting a hazard already at max layers
+    ///   - a pure self-boost with every touched stat already clamped
+    ///   - a pure status move that every alive opponent blocks (an immune
+    ///     ACTIVE alone does not qualify — that is a legitimate
+    ///     switch-prediction play; every reserve must be blocked too)
+    /// Tera variants are never dropped (tera itself changes state), and if
+    /// filtering would empty the list (trapped and locked into a no-op) the
+    /// original options are kept.
+    fn filter_side_one_noop_moves(&self, options: &mut Vec<MoveChoice>) {
+        let active = self.side_one.get_active_immutable();
+        let filtered: Vec<MoveChoice> = options
+            .iter()
+            .filter(|mc| match mc {
+                MoveChoice::Move(idx) => !self.move_is_strict_noop(&active.moves[idx].choice),
+                _ => true,
+            })
+            .copied()
+            .collect();
+        if !filtered.is_empty() && filtered.len() < options.len() {
+            *options = filtered;
+        }
+    }
+
+    fn move_is_strict_noop(&self, choice: &Choice) -> bool {
+        if choice.category != MoveCategory::Status || choice.secondaries.is_some() {
+            return false;
+        }
+        // exactly one primary effect: a second effect (or none encoded at
+        // all — special-cased moves like Trick live outside these fields)
+        // means "nothing happens" cannot be proven from here
+        let effect_count = choice.boost.is_some() as u8
+            + choice.status.is_some() as u8
+            + choice.heal.is_some() as u8
+            + choice.volatile_status.is_some() as u8
+            + choice.side_condition.is_some() as u8;
+        if effect_count != 1 {
+            return false;
+        }
+        if let Some(sc) = &choice.side_condition {
+            if sc.target != MoveTarget::Opponent {
+                return false;
+            }
+            let theirs = &self.side_two.side_conditions;
+            return match sc.condition {
+                PokemonSideCondition::Stealthrock => theirs.stealth_rock >= 1,
+                PokemonSideCondition::Spikes => theirs.spikes >= 3,
+                PokemonSideCondition::ToxicSpikes => theirs.toxic_spikes >= 2,
+                PokemonSideCondition::StickyWeb => theirs.sticky_web >= 1,
+                _ => false,
+            };
+        }
+        if let Some(boost) = &choice.boost {
+            let user = self.side_one.get_active_immutable();
+            if boost.target != MoveTarget::User
+                || user.ability == Abilities::CONTRARY
+                || (choice.move_id == Choices::CURSE && user.has_type(&PokemonType::GHOST))
+            {
+                return false;
+            }
+            let clamped = |amount: i8, current: i8| {
+                amount == 0 || (amount > 0 && current >= 6) || (amount < 0 && current <= -6)
+            };
+            let b = &boost.boosts;
+            let s = &self.side_one;
+            return clamped(b.attack, s.attack_boost)
+                && clamped(b.defense, s.defense_boost)
+                && clamped(b.special_attack, s.special_attack_boost)
+                && clamped(b.special_defense, s.special_defense_boost)
+                && clamped(b.speed, s.speed_boost)
+                && clamped(b.accuracy, s.accuracy_boost);
+        }
+        if let Some(status) = &choice.status {
+            if status.target != MoveTarget::Opponent {
+                return false;
+            }
+            let mut iter = self.side_two.pokemon.into_iter();
+            while iter.next().is_some() {
+                let idx = iter.pokemon_index;
+                if self.side_two.pokemon[idx].hp > 0
+                    && !self.s2_mon_blocks_status(idx, choice, &status.status)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Would `status` from side-one's active provably fail against this
+    /// side-two mon, whether it is (or switches in as) the active? Mirrors
+    /// the engine's own gates (move_has_no_effect + immune_to_status) so
+    /// no-op-ness is engine-relative, not Showdown-relative.
+    fn s2_mon_blocks_status(
+        &self,
+        idx: PokemonIndex,
+        choice: &Choice,
+        status: &PokemonStatus,
+    ) -> bool {
+        let pkmn = &self.side_two.pokemon[idx];
+        if choice.move_type == PokemonType::ELECTRIC && pkmn.has_type(&PokemonType::GROUND) {
+            return true;
+        }
+        #[cfg(any(feature = "gen6", feature = "gen7", feature = "gen8", feature = "gen9"))]
+        if choice.flags.powder && pkmn.has_type(&PokemonType::GRASS) {
+            return true;
+        }
+        if idx == self.side_two.active_index {
+            return immune_to_status(self, &MoveTarget::Opponent, &SideReference::SideTwo, status);
+        }
+        // hypothetical switch-in: side-level volatiles (sub included) are gone
+        let mut hypo = self.clone();
+        hypo.side_two.active_index = idx;
+        hypo.side_two.volatile_statuses.clear();
+        hypo.side_two.substitute_health = 0;
+        immune_to_status(&hypo, &MoveTarget::Opponent, &SideReference::SideTwo, status)
     }
 
     pub fn get_all_options(&self) -> (Vec<MoveChoice>, Vec<MoveChoice>) {
@@ -1203,5 +1339,127 @@ impl State {
         */
         self.set_damage_dealt_flag();
         self.set_last_used_move_flag();
+    }
+}
+
+#[cfg(test)]
+mod best_useful_tests {
+    use super::*;
+    use crate::choices::MOVES;
+    use crate::state::{PokemonMoveIndex, State};
+
+    const ALL: [PokemonIndex; 6] = [
+        PokemonIndex::P0,
+        PokemonIndex::P1,
+        PokemonIndex::P2,
+        PokemonIndex::P3,
+        PokemonIndex::P4,
+        PokemonIndex::P5,
+    ];
+
+    fn set_move(state: &mut State, slot: PokemonMoveIndex, id: Choices) {
+        let active = state.side_one.get_active();
+        active.replace_move(slot, id);
+        active.moves[&slot].pp = 16;
+    }
+
+    /// Toxic with a statused ACTIVE but healthy reserves is switch-prediction
+    /// and must survive; once every alive opponent is statused it is provable.
+    #[test]
+    fn toxic_dropped_only_when_every_alive_opponent_blocks() {
+        let mut state = State::default();
+        state.side_two.get_active().status = PokemonStatus::TOXIC;
+        let toxic = MOVES.get(&Choices::TOXIC).unwrap();
+        assert!(!state.move_is_strict_noop(toxic));
+        for idx in ALL {
+            state.side_two.pokemon[idx].status = PokemonStatus::POISON;
+        }
+        assert!(state.move_is_strict_noop(toxic));
+    }
+
+    /// Fainted reserves cannot be status targets; only alive mons gate.
+    #[test]
+    fn dead_reserves_do_not_keep_toxic_alive() {
+        let mut state = State::default();
+        state.side_two.get_active().status = PokemonStatus::TOXIC;
+        for idx in ALL {
+            if idx != state.side_two.active_index {
+                state.side_two.pokemon[idx].hp = 0;
+            }
+        }
+        assert!(state.move_is_strict_noop(MOVES.get(&Choices::TOXIC).unwrap()));
+    }
+
+    /// Thunder Wave vs an all-Ground side mirrors the engine's
+    /// electric-vs-ground gate; one non-Ground reserve keeps it.
+    #[test]
+    fn thunder_wave_blocked_by_all_ground_side() {
+        let mut state = State::default();
+        for idx in ALL {
+            state.side_two.pokemon[idx].types = (PokemonType::GROUND, PokemonType::TYPELESS);
+        }
+        let twave = MOVES.get(&Choices::THUNDERWAVE).unwrap();
+        assert!(state.move_is_strict_noop(twave));
+        state.side_two.pokemon[PokemonIndex::P4].types =
+            (PokemonType::NORMAL, PokemonType::TYPELESS);
+        assert!(!state.move_is_strict_noop(twave));
+    }
+
+    /// Calm Mind is a no-op only with BOTH touched stats clamped at +6,
+    /// and never for a Contrary user.
+    #[test]
+    fn calm_mind_dropped_at_plus_six_only() {
+        let mut state = State::default();
+        let cm = MOVES.get(&Choices::CALMMIND).unwrap();
+        state.side_one.special_attack_boost = 6;
+        state.side_one.special_defense_boost = 5;
+        assert!(!state.move_is_strict_noop(cm));
+        state.side_one.special_defense_boost = 6;
+        assert!(state.move_is_strict_noop(cm));
+        state.side_one.get_active().ability = Abilities::CONTRARY;
+        assert!(!state.move_is_strict_noop(cm));
+    }
+
+    /// Re-setting a maxed hazard is a no-op; below the cap it is not.
+    #[test]
+    fn maxed_hazards_dropped() {
+        let mut state = State::default();
+        let rocks = MOVES.get(&Choices::STEALTHROCK).unwrap();
+        let spikes = MOVES.get(&Choices::SPIKES).unwrap();
+        assert!(!state.move_is_strict_noop(rocks));
+        state.side_two.side_conditions.stealth_rock = 1;
+        assert!(state.move_is_strict_noop(rocks));
+        state.side_two.side_conditions.spikes = 2;
+        assert!(!state.move_is_strict_noop(spikes));
+        state.side_two.side_conditions.spikes = 3;
+        assert!(state.move_is_strict_noop(spikes));
+    }
+
+    /// The option filter drops the no-op Move but keeps switches and tera
+    /// variants, and falls back to the original list rather than emptying it.
+    #[test]
+    fn filter_keeps_tera_and_never_empties() {
+        let mut state = State::default();
+        set_move(&mut state, PokemonMoveIndex::M0, Choices::TOXIC);
+        set_move(&mut state, PokemonMoveIndex::M1, Choices::TACKLE);
+        for idx in ALL {
+            state.side_two.pokemon[idx].status = PokemonStatus::POISON;
+        }
+        let mut options = vec![
+            MoveChoice::Move(PokemonMoveIndex::M0),
+            MoveChoice::MoveTera(PokemonMoveIndex::M0),
+            MoveChoice::Move(PokemonMoveIndex::M1),
+        ];
+        state.filter_side_one_noop_moves(&mut options);
+        assert_eq!(
+            options,
+            vec![
+                MoveChoice::MoveTera(PokemonMoveIndex::M0),
+                MoveChoice::Move(PokemonMoveIndex::M1),
+            ]
+        );
+        let mut only_noop = vec![MoveChoice::Move(PokemonMoveIndex::M0)];
+        state.filter_side_one_noop_moves(&mut only_noop);
+        assert_eq!(only_noop, vec![MoveChoice::Move(PokemonMoveIndex::M0)]);
     }
 }
