@@ -38,6 +38,7 @@ struct EvalOff {
     pp: bool,
     synergy: bool,
     threatv2: bool,
+    locks: bool,
     baseline: bool,
 }
 
@@ -72,6 +73,13 @@ impl EvalOff {
             pp: has("pp"),
             synergy: has("synergy"),
             threatv2: !has_on("threatv2"),
+            // locks parked 2026-07-23 night: locknr suite gate accept-h0
+            // (llr -3.338, 32.5%/234) through a gate tilted TOWARD acceptance
+            // — the choice-on-wall liability likely over-sweeps legitimate
+            // scarf holders. The TWave-lock breaking itself was verified
+            // (max run 27 -> <13); revisit as locked-into-status ONLY, or
+            // with the liability narrowed to walls with zero usable attacks.
+            locks: !has_on("locks"),
             baseline: all,
         }
     }
@@ -185,6 +193,27 @@ fn is_choice_item(item: Items) -> bool {
 /// every other move slot after the first click, so the signature is a choice
 /// item + disabled slots + no usable damaging move. Actives only — the lock
 /// clears on switch-out.
+/// Choice item on a status-heavy mon with no Trick/Switcheroo to hand it
+/// off: a liability, not the flat +13.
+fn choice_on_wall(pokemon: &Pokemon) -> bool {
+    if !is_choice_item(pokemon.item) {
+        return false;
+    }
+    let mut status_moves = 0;
+    for mv in pokemon.moves.into_iter() {
+        if mv.id == Choices::NONE {
+            continue;
+        }
+        if matches!(mv.id, Choices::TRICK | Choices::SWITCHEROO) {
+            return false;
+        }
+        if mv.choice.category == MoveCategory::Status {
+            status_moves += 1;
+        }
+    }
+    status_moves >= 2
+}
+
 fn choice_locked_into_status(pokemon: &Pokemon) -> bool {
     if !is_choice_item(pokemon.item) {
         return false;
@@ -960,24 +989,10 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
                 / pokemon.maxhp as f32
                 * POKEMON_HP;
         }
-        if is_choice_item(pokemon.item) {
-            let mut status_moves = 0;
-            let mut has_trick = false;
-            for mv in pokemon.moves.into_iter() {
-                if mv.id == Choices::NONE {
-                    continue;
-                }
-                if matches!(mv.id, Choices::TRICK | Choices::SWITCHEROO) {
-                    has_trick = true;
-                }
-                if mv.choice.category == MoveCategory::Status {
-                    status_moves += 1;
-                }
-            }
-            if !has_trick && status_moves >= 2 {
-                score += CHOICE_ON_WALL;
-            }
-        }
+    }
+
+    if !eval_off().locks && choice_on_wall(pokemon) {
+        score += CHOICE_ON_WALL;
     }
 
     // upstream scores "holding any item" as a flat +10; ours prices items individually
@@ -1028,7 +1043,7 @@ pub fn evaluate(state: &State) -> f32 {
             score += evaluate_hazards(pkmn, &state.side_one);
             if iter.pokemon_index == state.side_one.active_index {
                 score += evaluate_active_volatiles(pkmn, &state.side_one);
-                if !off.synergy && choice_locked_into_status(pkmn) {
+                if !off.locks && choice_locked_into_status(pkmn) {
                     score += CHOICE_LOCKED_STATUS;
                 }
                 if !off.tera {
@@ -1061,7 +1076,7 @@ pub fn evaluate(state: &State) -> f32 {
 
             if iter.pokemon_index == state.side_two.active_index {
                 score -= evaluate_active_volatiles(pkmn, &state.side_two);
-                if !off.synergy && choice_locked_into_status(pkmn) {
+                if !off.locks && choice_locked_into_status(pkmn) {
                     score -= CHOICE_LOCKED_STATUS;
                 }
                 if !off.tera {
@@ -1304,15 +1319,13 @@ mod tests {
             active.moves[&PokemonMoveIndex::M1].pp = 10;
             active.moves[&PokemonMoveIndex::M1].disabled = true;
         }
-        let locked = evaluate(&state);
+        assert!(super::choice_locked_into_status(
+            state.side_one.get_active_immutable()
+        ));
         state.side_one.get_active().moves[&PokemonMoveIndex::M1].disabled = false;
-        let free = evaluate(&state);
-        assert!(
-            (free - locked - (-super::CHOICE_LOCKED_STATUS)).abs() < 1e-3,
-            "locked {} vs free {}",
-            locked,
-            free
-        );
+        assert!(!super::choice_locked_into_status(
+            state.side_one.get_active_immutable()
+        ));
     }
 
     /// A choice item on a two-status-move wall is a liability vs Leftovers
@@ -1337,16 +1350,9 @@ mod tests {
             }
             active.item = Items::CHOICESCARF;
         }
-        let scarfed = evaluate(&state);
+        assert!(super::choice_on_wall(state.side_one.get_active_immutable()));
         state.side_one.get_active().item = Items::LEFTOVERS;
-        let lefties = evaluate(&state);
-        // scarf - lefties = (13 - 9) + CHOICE_ON_WALL = 4 - 20 = -16
-        assert!(
-            (scarfed - lefties - (4.0 + super::CHOICE_ON_WALL)).abs() < 1e-3,
-            "scarfed {} vs leftovers {}",
-            scarfed,
-            lefties
-        );
+        assert!(!super::choice_on_wall(state.side_one.get_active_immutable()));
         // adding Trick exempts the holder: scarf is ammo
         {
             let active = state.side_one.get_active();
@@ -1356,13 +1362,7 @@ mod tests {
                 MOVES.get(&Choices::TRICK).unwrap().clone();
             active.moves[&PokemonMoveIndex::M3].pp = 10;
         }
-        let with_trick = evaluate(&state);
-        assert!(
-            (with_trick - lefties - 4.0).abs() < 1e-3,
-            "with_trick {} vs leftovers {}",
-            with_trick,
-            lefties
-        );
+        assert!(!super::choice_on_wall(state.side_one.get_active_immutable()));
     }
 
     #[test]
