@@ -43,11 +43,12 @@ struct EvalOff {
 
 impl EvalOff {
     /// `list` (CB_EVAL_OFF) disables default-ON terms; `on_list` (CB_EVAL_ON)
-    /// enables default-OFF experimental terms. synergy + threatv2 are
-    /// default-OFF since 2026-07-23: syngate/syniso both accept-h0 at gates
-    /// centered on the certified 45.7% level — not proof of regression (that
-    /// geometry is a coin flip at level strength), but the burden of proof
-    /// sits with the new terms and they haven't met it.
+    /// enables default-OFF experimental terms. synergy is default-ON since
+    /// 2026-07-23 late (synonly non-regression accept-h1 at 38.5%/195: the
+    /// terms are truth claims about the game state and cost nothing to run
+    /// everywhere; the earlier bundled accept-h0 is attributed to threatv2
+    /// via syniso). threatv2 stays default-OFF pending a recalibration that
+    /// co-tunes the boost/speedtier couplings.
     fn from_spec(all: bool, list: &str, on_list: &str) -> Self {
         let has =
             |k: &str| all || list.split(',').any(|t| t.trim().eq_ignore_ascii_case(k));
@@ -69,7 +70,7 @@ impl EvalOff {
             speedtier: has("speedtier"),
             poisonheal: has("poisonheal"),
             pp: has("pp"),
-            synergy: !has_on("synergy"),
+            synergy: has("synergy"),
             threatv2: !has_on("threatv2"),
             baseline: all,
         }
@@ -78,14 +79,16 @@ impl EvalOff {
 
 /// Stall-mode (fork, 2026-07-23): a PER-BATTLE archetype mode set by the
 /// driver at team preview when BOTH teams read as wall-heavy (recovery-move
-/// density). The parked synergy terms are globally winrate-neutral but their
-/// target context is the wall-war, so they activate only there, and the
-/// recovery-PP depletion penalty doubles (PP economics decide those games —
-/// stall audit 2026-07-23). An env var can't carry this: bench workers are
-/// persistent processes rotating teams per game, so it's an atomic the driver
-/// sets each preview (one battle per process at a time). Never active under
-/// CB_EVAL_BASELINE. First of the archetype modes — extend to an enum if
-/// more matchup profiles earn their keep.
+/// density). Holds the CONTEXT WEIGHTS only — the recovery-PP depletion
+/// penalty doubles and toxic-on-a-wall reprices to TOXIC_ON_WALL, because PP
+/// economics and the tox clock decide wall-wars (stall audit 2026-07-23).
+/// Truth-claim terms (synergy) are default-ON base eval instead, since
+/// 2026-07-23 late: facts always-on, context weights mode-gated. An env var
+/// can't carry this: bench workers are persistent processes rotating teams
+/// per game, so it's an atomic the driver sets each preview (one battle per
+/// process at a time). Never active under CB_EVAL_BASELINE. First of the
+/// archetype modes — extend to an enum if more matchup profiles earn their
+/// keep.
 pub static STALL_MODE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -319,9 +322,7 @@ fn evaluate_burned(pokemon: &Pokemon) -> f32 {
     // Flare Boost wants the burn just like Guts does (fork; upstream list below
     // stays untouched for CB_EVAL_BASELINE parity)
     let off = eval_off();
-    if (!off.synergy || (stall_mode() && !off.baseline))
-        && pokemon.ability == Abilities::FLAREBOOST
-    {
+    if !off.synergy && pokemon.ability == Abilities::FLAREBOOST {
         return -2.0 * POKEMON_BURNED;
     }
 
@@ -873,7 +874,7 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
         }
     }
 
-    if !eval_off().synergy || (stall_mode() && !eval_off().baseline) {
+    if !eval_off().synergy {
         if pokemon.status == PokemonStatus::NONE {
             score += match (pokemon.ability, pokemon.item) {
                 (Abilities::GUTS, Items::FLAMEORB)
@@ -1189,20 +1190,20 @@ mod tests {
         assert!(off.hazards && off.hopeless);
         assert!(!off.threat && !off.items && !off.tera && !off.speedtier);
         assert!(!off.poisonheal && !off.pp);
-        let all = EvalOff::from_spec(true, "", "synergy,threatv2");
+        let all = EvalOff::from_spec(true, "", "threatv2");
         assert!(all.hazards && all.items && all.volatiles && all.threat
             && all.tera && all.pending && all.weather && all.terrain
             && all.hopeless && all.speedtier && all.poisonheal && all.pp);
-        // baseline forces experimental terms off even when CB_EVAL_ON lists them
+        // baseline forces everything off, even CB_EVAL_ON-listed terms
         assert!(all.synergy && all.threatv2);
         let none = EvalOff::from_spec(false, "", "");
+        // synergy default-ON (truth claims); threatv2 default-OFF (parked)
+        assert!(!none.synergy && none.threatv2);
         assert!(!none.hazards && !none.hopeless && !none.volatiles);
-        // default-OFF experimental terms: disabled unless CB_EVAL_ON enables
-        assert!(none.synergy && none.threatv2);
-        let on = EvalOff::from_spec(false, "", "synergy, THREATV2");
-        assert!(!on.synergy && !on.threatv2 && !on.hazards);
+        let sy_off = EvalOff::from_spec(false, "synergy", "THREATV2");
+        assert!(sy_off.synergy && !sy_off.threatv2 && !sy_off.hazards);
         let ph = EvalOff::from_spec(false, "poisonheal,pp", "");
-        assert!(ph.poisonheal && ph.pp && !ph.hazards && ph.synergy);
+        assert!(ph.poisonheal && ph.pp && !ph.hazards && !ph.synergy);
         assert!(!ph.baseline && EvalOff::from_spec(true, "", "").baseline);
     }
 
