@@ -123,6 +123,8 @@ define_enum_with_from_str! {
         AGUAVBERRY,
         FIGYBERRY,
         IAPAPABERRY,
+        KEEBERRY,
+        MARANGABERRY,
         GRISEOUSORB,
         GRISEOUSCORE,
         TANGABERRY,
@@ -1051,6 +1053,48 @@ pub fn item_modify_attack_against(
                     effect: Effect::Heal(-0.166),
                     target: MoveTarget::User,
                 })
+            }
+        }
+        Items::KEEBERRY => {
+            if attacking_choice.category == MoveCategory::Physical {
+                attacking_choice.add_or_create_secondaries(Secondary {
+                    chance: 100.0,
+                    effect: Effect::Boost(StatBoosts {
+                        attack: 0,
+                        defense: 1,
+                        special_attack: 0,
+                        special_defense: 0,
+                        speed: 0,
+                        accuracy: 0,
+                    }),
+                    target: MoveTarget::Opponent,
+                });
+                attacking_choice.add_or_create_secondaries(Secondary {
+                    chance: 100.0,
+                    effect: Effect::RemoveItem,
+                    target: MoveTarget::Opponent,
+                });
+            }
+        }
+        Items::MARANGABERRY => {
+            if attacking_choice.category == MoveCategory::Special {
+                attacking_choice.add_or_create_secondaries(Secondary {
+                    chance: 100.0,
+                    effect: Effect::Boost(StatBoosts {
+                        attack: 0,
+                        defense: 0,
+                        special_attack: 0,
+                        special_defense: 1,
+                        speed: 0,
+                        accuracy: 0,
+                    }),
+                    target: MoveTarget::Opponent,
+                });
+                attacking_choice.add_or_create_secondaries(Secondary {
+                    chance: 100.0,
+                    effect: Effect::RemoveItem,
+                    target: MoveTarget::Opponent,
+                });
             }
         }
         Items::WEAKNESSPOLICY => {
