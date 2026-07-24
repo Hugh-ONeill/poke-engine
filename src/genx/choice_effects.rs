@@ -1,7 +1,7 @@
 use super::abilities::Abilities;
 use super::damage_calc::type_effectiveness_modifier;
 use super::generate_instructions::{add_remove_status_instructions, apply_boost_instruction};
-use super::items::{get_choice_move_disable_instructions, Items};
+use super::items::{get_choice_move_disable_instructions, weather_set_turns, Items};
 use super::state::{PokemonVolatileStatus, Terrain, Weather};
 use crate::choices::{
     Boost, Choice, Choices, Effect, Heal, MoveCategory, MoveTarget, Secondary, StatBoosts,
@@ -1652,72 +1652,102 @@ pub fn choice_special_effect(
         }
         Choices::SUNNYDAY => {
             if state.weather.weather_type != Weather::SUN {
+                let turns = weather_set_turns(
+                    state
+                        .get_side_immutable(attacking_side_ref)
+                        .get_active_immutable(),
+                    &Weather::SUN,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: Weather::SUN,
-                        new_weather_turns_remaining: 5,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = Weather::SUN;
-                state.weather.turns_remaining = 5;
+                state.weather.turns_remaining = turns;
             }
         }
         Choices::RAINDANCE => {
             if state.weather.weather_type != Weather::RAIN {
+                let turns = weather_set_turns(
+                    state
+                        .get_side_immutable(attacking_side_ref)
+                        .get_active_immutable(),
+                    &Weather::RAIN,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: Weather::RAIN,
-                        new_weather_turns_remaining: 5,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = Weather::RAIN;
-                state.weather.turns_remaining = 5;
+                state.weather.turns_remaining = turns;
             }
         }
         Choices::SANDSTORM => {
             if state.weather.weather_type != Weather::SAND {
+                let turns = weather_set_turns(
+                    state
+                        .get_side_immutable(attacking_side_ref)
+                        .get_active_immutable(),
+                    &Weather::SAND,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: Weather::SAND,
-                        new_weather_turns_remaining: 5,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = Weather::SAND;
-                state.weather.turns_remaining = 5;
+                state.weather.turns_remaining = turns;
             }
         }
         Choices::HAIL => {
             if state.weather.weather_type != Weather::HAIL {
+                let turns = weather_set_turns(
+                    state
+                        .get_side_immutable(attacking_side_ref)
+                        .get_active_immutable(),
+                    &Weather::HAIL,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: Weather::HAIL,
-                        new_weather_turns_remaining: 5,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = Weather::HAIL;
-                state.weather.turns_remaining = 5;
+                state.weather.turns_remaining = turns;
             }
         }
         Choices::SNOWSCAPE | Choices::CHILLYRECEPTION => {
             if state.weather.weather_type != Weather::SNOW {
+                let turns = weather_set_turns(
+                    state
+                        .get_side_immutable(attacking_side_ref)
+                        .get_active_immutable(),
+                    &Weather::SNOW,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: Weather::SNOW,
-                        new_weather_turns_remaining: 5,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = Weather::SNOW;
-                state.weather.turns_remaining = 5;
+                state.weather.turns_remaining = turns;
             }
         }
         _ => {}

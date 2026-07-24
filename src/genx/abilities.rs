@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 use super::damage_calc::type_effectiveness_modifier;
 use super::generate_instructions::{add_remove_status_instructions, apply_boost_instruction};
-use super::items::{get_choice_move_disable_instructions, Items};
+use super::items::{get_choice_move_disable_instructions, terrain_set_turns, weather_set_turns, Items};
 use super::state::{PokemonVolatileStatus, Terrain, Weather};
 use crate::choices::{
     Boost, Choice, Choices, Effect, Heal, MoveCategory, MoveTarget, Secondary, StatBoosts,
@@ -1771,16 +1771,20 @@ pub fn ability_on_switch_in(
         }
         Abilities::DROUGHT | Abilities::ORICHALCUMPULSE => {
             if state.weather.weather_type != Weather::SUN {
+                let turns = weather_set_turns(
+                    state.get_side_immutable(side_ref).get_active_immutable(),
+                    &Weather::SUN,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: Weather::SUN,
-                        new_weather_turns_remaining: WEATHER_ABILITY_TURNS,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = Weather::SUN;
-                state.weather.turns_remaining = WEATHER_ABILITY_TURNS;
+                state.weather.turns_remaining = turns;
             }
         }
         Abilities::DESOLATELAND => {
@@ -1799,30 +1803,37 @@ pub fn ability_on_switch_in(
         }
         Abilities::MISTYSURGE => {
             if state.terrain.terrain_type != Terrain::MISTYTERRAIN {
+                let turns = terrain_set_turns(
+                    state.get_side_immutable(side_ref).get_active_immutable(),
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeTerrain(ChangeTerrain {
                         new_terrain: Terrain::MISTYTERRAIN,
-                        new_terrain_turns_remaining: 5,
+                        new_terrain_turns_remaining: turns,
                         previous_terrain: state.terrain.terrain_type,
                         previous_terrain_turns_remaining: state.terrain.turns_remaining,
                     }));
                 state.terrain.terrain_type = Terrain::MISTYTERRAIN;
-                state.terrain.turns_remaining = 5;
+                state.terrain.turns_remaining = turns;
             }
         }
         Abilities::SANDSTREAM => {
             if state.weather.weather_type != Weather::SAND {
+                let turns = weather_set_turns(
+                    state.get_side_immutable(side_ref).get_active_immutable(),
+                    &Weather::SAND,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: Weather::SAND,
-                        new_weather_turns_remaining: WEATHER_ABILITY_TURNS,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = Weather::SAND;
-                state.weather.turns_remaining = WEATHER_ABILITY_TURNS;
+                state.weather.turns_remaining = turns;
             }
         }
         Abilities::INTIMIDATE => {
@@ -1881,30 +1892,36 @@ pub fn ability_on_switch_in(
         }
         Abilities::GRASSYSURGE => {
             if state.terrain.terrain_type != Terrain::GRASSYTERRAIN {
+                let turns = terrain_set_turns(
+                    state.get_side_immutable(side_ref).get_active_immutable(),
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeTerrain(ChangeTerrain {
                         new_terrain: Terrain::GRASSYTERRAIN,
-                        new_terrain_turns_remaining: 5,
+                        new_terrain_turns_remaining: turns,
                         previous_terrain: state.terrain.terrain_type,
                         previous_terrain_turns_remaining: state.terrain.turns_remaining,
                     }));
                 state.terrain.terrain_type = Terrain::GRASSYTERRAIN;
-                state.terrain.turns_remaining = 5;
+                state.terrain.turns_remaining = turns;
             }
         }
         Abilities::ELECTRICSURGE | Abilities::HADRONENGINE => {
             if state.terrain.terrain_type != Terrain::ELECTRICTERRAIN {
+                let turns = terrain_set_turns(
+                    state.get_side_immutable(side_ref).get_active_immutable(),
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeTerrain(ChangeTerrain {
                         new_terrain: Terrain::ELECTRICTERRAIN,
-                        new_terrain_turns_remaining: 5,
+                        new_terrain_turns_remaining: turns,
                         previous_terrain: state.terrain.terrain_type,
                         previous_terrain_turns_remaining: state.terrain.turns_remaining,
                     }));
                 state.terrain.terrain_type = Terrain::ELECTRICTERRAIN;
-                state.terrain.turns_remaining = 5;
+                state.terrain.turns_remaining = turns;
             }
         }
         Abilities::DOWNLOAD => {
@@ -2025,44 +2042,55 @@ pub fn ability_on_switch_in(
             let weather_type = Weather::HAIL;
 
             if state.weather.weather_type != weather_type {
+                let turns = weather_set_turns(
+                    state.get_side_immutable(side_ref).get_active_immutable(),
+                    &weather_type,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: weather_type,
-                        new_weather_turns_remaining: WEATHER_ABILITY_TURNS,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = weather_type;
-                state.weather.turns_remaining = WEATHER_ABILITY_TURNS;
+                state.weather.turns_remaining = turns;
             }
         }
         Abilities::PSYCHICSURGE => {
             if state.terrain.terrain_type != Terrain::PSYCHICTERRAIN {
+                let turns = terrain_set_turns(
+                    state.get_side_immutable(side_ref).get_active_immutable(),
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeTerrain(ChangeTerrain {
                         new_terrain: Terrain::PSYCHICTERRAIN,
-                        new_terrain_turns_remaining: 5,
+                        new_terrain_turns_remaining: turns,
                         previous_terrain: state.terrain.terrain_type,
                         previous_terrain_turns_remaining: state.terrain.turns_remaining,
                     }));
                 state.terrain.terrain_type = Terrain::PSYCHICTERRAIN;
-                state.terrain.turns_remaining = 5;
+                state.terrain.turns_remaining = turns;
             }
         }
         Abilities::DRIZZLE => {
             if state.weather.weather_type != Weather::RAIN {
+                let turns = weather_set_turns(
+                    state.get_side_immutable(side_ref).get_active_immutable(),
+                    &Weather::RAIN,
+                );
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeWeather(ChangeWeather {
                         new_weather: Weather::RAIN,
-                        new_weather_turns_remaining: WEATHER_ABILITY_TURNS,
+                        new_weather_turns_remaining: turns,
                         previous_weather: state.weather.weather_type,
                         previous_weather_turns_remaining: state.weather.turns_remaining,
                     }));
                 state.weather.weather_type = Weather::RAIN;
-                state.weather.turns_remaining = WEATHER_ABILITY_TURNS;
+                state.weather.turns_remaining = turns;
             }
         }
         _ => {}

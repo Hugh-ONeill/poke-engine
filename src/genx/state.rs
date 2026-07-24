@@ -1037,7 +1037,9 @@ impl State {
             return true;
         }
         #[cfg(any(feature = "gen6", feature = "gen7", feature = "gen8", feature = "gen9"))]
-        if choice.flags.powder && pkmn.has_type(&PokemonType::GRASS) {
+        if choice.flags.powder
+            && (pkmn.has_type(&PokemonType::GRASS) || pkmn.item == Items::SAFETYGOGGLES)
+        {
             return true;
         }
         if idx == self.side_two.active_index {

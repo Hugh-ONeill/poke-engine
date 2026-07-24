@@ -21779,3 +21779,83 @@ fn test_black_sludge_damages_full_hp_non_poison_holder() {
     }];
     assert_eq!(expected_instructions, vec_of_instructions);
 }
+
+#[test]
+fn test_heat_rock_extends_sunny_day_to_eight_turns() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_one.get_active().item = Items::HEATROCK;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::SUNNYDAY,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![
+            Instruction::ChangeWeather(ChangeWeather {
+                new_weather: Weather::SUN,
+                new_weather_turns_remaining: 8,
+                previous_weather: Weather::NONE,
+                previous_weather_turns_remaining: -1,
+            }),
+            Instruction::DecrementWeatherTurnsRemaining,
+        ],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_light_clay_extends_reflect_to_eight_turns() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_one.get_active().item = Items::LIGHTCLAY;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::REFLECT,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![
+            Instruction::ChangeSideCondition(ChangeSideConditionInstruction {
+                side_ref: SideReference::SideOne,
+                side_condition: PokemonSideCondition::Reflect,
+                amount: 8,
+            }),
+            // screens tick at the end of the turn they are set
+            Instruction::ChangeSideCondition(ChangeSideConditionInstruction {
+                side_ref: SideReference::SideOne,
+                side_condition: PokemonSideCondition::Reflect,
+                amount: -1,
+            }),
+        ],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_safety_goggles_blocks_spore() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_two.get_active().item = Items::SAFETYGOGGLES;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::SPORE,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}

@@ -2,7 +2,7 @@
 use super::abilities::Abilities;
 use super::damage_calc::type_effectiveness_modifier;
 use super::generate_instructions::{apply_boost_instruction, immune_to_status};
-use super::state::Terrain;
+use super::state::{Terrain, Weather};
 use crate::choices::{Choice, Choices, Effect, MoveCategory, MoveTarget, Secondary, StatBoosts};
 use crate::define_enum_with_from_str;
 use crate::engine::generate_instructions::add_remove_status_instructions;
@@ -97,6 +97,32 @@ define_enum_with_from_str! {
         SOFTSAND,
         SOULDEW,
         STICKYBARB,
+        // 2026-07-24 item-gap sweep: everything below was in live set/team
+        // data but parsed to UNKNOWNITEM (+5 eval, zero mechanics). Duration
+        // extenders + Safety Goggles have mechanics; the rest are identity
+        // (Trick/Knock Off correctness) with default eval until modeled.
+        HEATROCK,
+        DAMPROCK,
+        SMOOTHROCK,
+        ICYROCK,
+        LIGHTCLAY,
+        TERRAINEXTENDER,
+        EJECTBUTTON,
+        EJECTPACK,
+        REDCARD,
+        LEPPABERRY,
+        MENTALHERB,
+        SAFETYGOGGLES,
+        QUICKCLAW,
+        SCOPELENS,
+        MIRRORHERB,
+        LAGGINGTAIL,
+        ABILITYSHIELD,
+        RINGTARGET,
+        BIGROOT,
+        AGUAVBERRY,
+        FIGYBERRY,
+        IAPAPABERRY,
         GRISEOUSORB,
         GRISEOUSCORE,
         TANGABERRY,
@@ -1714,5 +1740,39 @@ pub fn item_modify_attack_being_used(
             }
         }
         _ => {}
+    }
+}
+
+// Duration-extending held items. The suite's own sun team (Ninetales @ Heat
+// Rock) and the pool's Damp Rock rain teams were mis-modeled at 5 turns
+// while their items parsed as UNKNOWNITEM (found in the 2026-07-24 sweep).
+pub fn weather_set_turns(setter: &Pokemon, weather: &Weather) -> i8 {
+    let rock = match weather {
+        Weather::SUN => Items::HEATROCK,
+        Weather::RAIN => Items::DAMPROCK,
+        Weather::SAND => Items::SMOOTHROCK,
+        Weather::HAIL | Weather::SNOW => Items::ICYROCK,
+        _ => return 5,
+    };
+    if setter.item == rock {
+        8
+    } else {
+        5
+    }
+}
+
+pub fn terrain_set_turns(setter: &Pokemon) -> i8 {
+    if setter.item == Items::TERRAINEXTENDER {
+        8
+    } else {
+        5
+    }
+}
+
+pub fn screen_set_turns(setter: &Pokemon) -> i8 {
+    if setter.item == Items::LIGHTCLAY {
+        8
+    } else {
+        5
     }
 }

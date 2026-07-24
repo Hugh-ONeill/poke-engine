@@ -29,7 +29,7 @@ use super::damage_calc::calculate_futuresight_damage;
 use super::damage_calc::{calculate_damage, type_effectiveness_modifier, DamageRolls};
 use super::items::{
     item_before_move, item_end_of_turn, item_modify_attack_against, item_modify_attack_being_used,
-    item_on_switch_in, Items,
+    item_on_switch_in, screen_set_turns, Items,
 };
 use super::state::{MoveChoice, PokemonVolatileStatus, Terrain, Weather};
 use crate::choices::{Choice, MoveCategory};
@@ -549,9 +549,22 @@ fn generate_instructions_from_side_conditions(
     match side_condition.condition {
         PokemonSideCondition::AuroraVeil
         | PokemonSideCondition::LightScreen
-        | PokemonSideCondition::Reflect
-        | PokemonSideCondition::Safeguard
-        | PokemonSideCondition::Mist => {
+        | PokemonSideCondition::Reflect => {
+            // Light Clay on the setter: 8-turn screens instead of 5
+            let duration = screen_set_turns(
+                state
+                    .get_side_immutable(attacking_side_reference)
+                    .get_active_immutable(),
+            );
+            generate_instructions_from_duration_side_conditions(
+                state,
+                side_condition,
+                attacking_side_reference,
+                incoming_instructions,
+                duration,
+            );
+        }
+        PokemonSideCondition::Safeguard | PokemonSideCondition::Mist => {
             generate_instructions_from_duration_side_conditions(
                 state,
                 side_condition,
@@ -1502,7 +1515,7 @@ fn move_has_no_effect(state: &State, choice: &Choice, attacking_side_ref: &SideR
     #[cfg(any(feature = "gen6", feature = "gen7", feature = "gen8", feature = "gen9"))]
     if choice.flags.powder
         && choice.target == MoveTarget::Opponent
-        && defender.has_type(&PokemonType::GRASS)
+        && (defender.has_type(&PokemonType::GRASS) || defender.item == Items::SAFETYGOGGLES)
     {
         return true;
     }
