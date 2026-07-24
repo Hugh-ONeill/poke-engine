@@ -21706,3 +21706,76 @@ fn test_mustrecharge_move_only_allows_none() {
     );
     assert_eq!(expected_options, options);
 }
+
+#[test]
+fn test_sticky_barb_damages_holder_at_end_of_turn() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_one.get_active().item = Items::STICKYBARB;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::SPLASH,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![Instruction::Damage(DamageInstruction {
+            side_ref: SideReference::SideOne,
+            damage_amount: 12,
+        })],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_sticky_barb_damage_capped_at_remaining_hp() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_one.get_active().item = Items::STICKYBARB;
+    state.side_one.get_active().hp = 5;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::SPLASH,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![Instruction::Damage(DamageInstruction {
+            side_ref: SideReference::SideOne,
+            damage_amount: 5,
+        })],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_black_sludge_damages_full_hp_non_poison_holder() {
+    // pins the 2026-07-24 fix: the damage branch used the HEAL cap
+    // (maxhp - hp), so a full-HP non-poison holder took zero, and the rate
+    // was the heal's 1/16 instead of the damage's 1/8
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_one.get_active().item = Items::BLACKSLUDGE;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::SPLASH,
+        Choices::SPLASH,
+    );
+
+    let expected_instructions = vec![StateInstructions {
+        percentage: 100.0,
+        instruction_list: vec![Instruction::Damage(DamageInstruction {
+            side_ref: SideReference::SideOne,
+            damage_amount: 12,
+        })],
+    }];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}

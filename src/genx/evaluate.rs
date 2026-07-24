@@ -885,6 +885,10 @@ fn evaluate_item(item: Items) -> f32 {
         Items::BOOSTERENERGY => 4.0,
         Items::SITRUSBERRY => 6.0,
         Items::TOXICORB | Items::FLAMEORB => 4.0,
+        // a held barb bleeds 1/8 per turn: a liability, not an asset — and
+        // pricing it negative makes Trick-ing it away (or refusing to
+        // receive it) worth a real margin instead of the +5 unknown default
+        Items::STICKYBARB => -10.0,
         Items::EXPERTBELT
         | Items::MUSCLEBAND
         | Items::WISEGLASSES

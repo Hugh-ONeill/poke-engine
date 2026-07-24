@@ -96,6 +96,7 @@ define_enum_with_from_str! {
         SKYPLATE,
         SOFTSAND,
         SOULDEW,
+        STICKYBARB,
         GRISEOUSORB,
         GRISEOUSCORE,
         TANGABERRY,
@@ -863,8 +864,27 @@ pub fn item_end_of_turn(
                     instructions.instruction_list.push(ins);
                 }
             } else {
-                let damage_amount =
-                    cmp::min(active_pkmn.maxhp / 16, active_pkmn.maxhp - active_pkmn.hp);
+                // 1/8 for the damage side (not the heal's 1/16), capped at
+                // remaining HP — the old heal-shaped cap (maxhp - hp) made a
+                // FULL-HP non-poison holder take zero damage
+                let damage_amount = cmp::min(active_pkmn.maxhp / 8, active_pkmn.hp);
+                let ins = Instruction::Damage(DamageInstruction {
+                    side_ref: side_ref.clone(),
+                    damage_amount: damage_amount,
+                });
+                active_pkmn.hp -= damage_amount;
+                instructions.instruction_list.push(ins);
+            }
+        }
+        Items::STICKYBARB => {
+            // typing-blind 1/8 residual; the trap the stall audit charged at
+            // 2.71 mons/game while the item was UNKNOWNITEM (+5 eval, no
+            // mechanics). With Trick modeled, in-tree barb swaps now price
+            // correctly too. Contact-transfer (barb jumps to an itemless
+            // contact attacker) is deliberately unmodeled: niche, and the
+            // observed state carries real transfers via the protocol.
+            let damage_amount = cmp::min(active_pkmn.maxhp / 8, active_pkmn.hp);
+            if damage_amount > 0 {
                 let ins = Instruction::Damage(DamageInstruction {
                     side_ref: side_ref.clone(),
                     damage_amount: damage_amount,

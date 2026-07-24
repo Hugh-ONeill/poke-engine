@@ -9625,6 +9625,8 @@ mod tests {
 
     #[test]
     fn test_blacksludge_damage_as_non_poison_type() {
+        // 1/8 of maxhp (12), not the heal's 1/16 — the old expectation (6)
+        // pinned the copy-pasted heal rate; fixed 2026-07-24
         let mut state = State::default();
         state.side_one.get_active().hp = 50;
         state.side_one.get_active().item = Items::BLACKSLUDGE;
@@ -9640,7 +9642,7 @@ mod tests {
             percentage: 100.0,
             instruction_list: vec![Instruction::Damage(DamageInstruction {
                 side_ref: SideReference::SideOne,
-                damage_amount: 6,
+                damage_amount: 12,
             })],
         };
 
