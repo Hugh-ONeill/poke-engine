@@ -162,6 +162,56 @@ const POISON_HEAL_PENDING: f32 = 15.0;
 const RECOVERY_PP_VALUE: f32 = 2.0;
 const RECOVERY_PP_CAP: i8 = 8;
 
+// Scarf-lock pricing (fork, 2026-07-23 night; from the toxw loss audit): our
+// mons sat choice-locked into THUNDER WAVE for 30+ turn stretches because a
+// locked mon reads as healthy — the eval had no lock-quality concept. A mon
+// whose only usable move is Status is functionally disabled until it
+// switches (worse than ENCORE, which at least expires), and a choice item on
+// a status-heavy wall is a liability, not +13 — unless the mon carries
+// Trick/Switcheroo, in which case the item is ammunition. The wall liability
+// also teaches Trick's real economics: giving the scarf to their Blissey is
+// worth far more than the item-value trade suggests.
+const CHOICE_LOCKED_STATUS: f32 = -35.0;
+const CHOICE_ON_WALL: f32 = -20.0;
+
+fn is_choice_item(item: Items) -> bool {
+    matches!(
+        item,
+        Items::CHOICEBAND | Items::CHOICESPECS | Items::CHOICESCARF
+    )
+}
+
+/// Choice-locked with only Status moves usable: the choice lock disables
+/// every other move slot after the first click, so the signature is a choice
+/// item + disabled slots + no usable damaging move. Actives only — the lock
+/// clears on switch-out.
+fn choice_locked_into_status(pokemon: &Pokemon) -> bool {
+    if !is_choice_item(pokemon.item) {
+        return false;
+    }
+    let mut any_disabled = false;
+    let mut usable_status = false;
+    let mut usable_attack = false;
+    for mv in pokemon.moves.into_iter() {
+        if mv.id == Choices::NONE {
+            continue;
+        }
+        if mv.disabled {
+            any_disabled = true;
+            continue;
+        }
+        if mv.pp <= 0 {
+            continue;
+        }
+        if mv.choice.category == MoveCategory::Status {
+            usable_status = true;
+        } else {
+            usable_attack = true;
+        }
+    }
+    any_disabled && usable_status && !usable_attack
+}
+
 // Status-synergy rifle terms (fork, 2026-07-23): the Poison Heal finding
 // generalized. Same pending-activation logic for the Guts family (the
 // burned-Guts STATE already scores +50 in evaluate_burned, so the loaded orb
@@ -910,6 +960,24 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
                 / pokemon.maxhp as f32
                 * POKEMON_HP;
         }
+        if is_choice_item(pokemon.item) {
+            let mut status_moves = 0;
+            let mut has_trick = false;
+            for mv in pokemon.moves.into_iter() {
+                if mv.id == Choices::NONE {
+                    continue;
+                }
+                if matches!(mv.id, Choices::TRICK | Choices::SWITCHEROO) {
+                    has_trick = true;
+                }
+                if mv.choice.category == MoveCategory::Status {
+                    status_moves += 1;
+                }
+            }
+            if !has_trick && status_moves >= 2 {
+                score += CHOICE_ON_WALL;
+            }
+        }
     }
 
     // upstream scores "holding any item" as a flat +10; ours prices items individually
@@ -960,6 +1028,9 @@ pub fn evaluate(state: &State) -> f32 {
             score += evaluate_hazards(pkmn, &state.side_one);
             if iter.pokemon_index == state.side_one.active_index {
                 score += evaluate_active_volatiles(pkmn, &state.side_one);
+                if !off.synergy && choice_locked_into_status(pkmn) {
+                    score += CHOICE_LOCKED_STATUS;
+                }
                 if !off.tera {
                     score += evaluate_tera_active(pkmn);
                 }
@@ -990,6 +1061,9 @@ pub fn evaluate(state: &State) -> f32 {
 
             if iter.pokemon_index == state.side_two.active_index {
                 score -= evaluate_active_volatiles(pkmn, &state.side_two);
+                if !off.synergy && choice_locked_into_status(pkmn) {
+                    score -= CHOICE_LOCKED_STATUS;
+                }
                 if !off.tera {
                     score -= evaluate_tera_active(pkmn);
                 }
@@ -1105,6 +1179,7 @@ mod tests {
     use super::threat_ability_bp_mult;
     use super::Abilities;
     use super::EvalOff;
+    use super::Items;
     use crate::choices::{Choice, Choices, MOVES};
     use crate::state::{SideReference, State};
 
@@ -1205,6 +1280,89 @@ mod tests {
         let ph = EvalOff::from_spec(false, "poisonheal,pp", "");
         assert!(ph.poisonheal && ph.pp && !ph.hazards && !ph.synergy);
         assert!(!ph.baseline && EvalOff::from_spec(true, "", "").baseline);
+    }
+
+    /// A scarfed active whose only usable move is Thunder Wave (others
+    /// choice-disabled) must read CHOICE_LOCKED_STATUS worse than the same
+    /// mon unlocked; enabling a damaging move removes exactly that penalty.
+    #[test]
+    fn choice_lock_into_status_is_penalized() {
+        use super::evaluate;
+        use crate::choices::MOVES;
+        use crate::state::{PokemonMoveIndex, State};
+        let mut state = State::default();
+        {
+            let active = state.side_one.get_active();
+            active.item = Items::CHOICESCARF;
+            active.moves[&PokemonMoveIndex::M0].id = Choices::THUNDERWAVE;
+            active.moves[&PokemonMoveIndex::M0].choice =
+                MOVES.get(&Choices::THUNDERWAVE).unwrap().clone();
+            active.moves[&PokemonMoveIndex::M0].pp = 10;
+            active.moves[&PokemonMoveIndex::M1].id = Choices::SLUDGEBOMB;
+            active.moves[&PokemonMoveIndex::M1].choice =
+                MOVES.get(&Choices::SLUDGEBOMB).unwrap().clone();
+            active.moves[&PokemonMoveIndex::M1].pp = 10;
+            active.moves[&PokemonMoveIndex::M1].disabled = true;
+        }
+        let locked = evaluate(&state);
+        state.side_one.get_active().moves[&PokemonMoveIndex::M1].disabled = false;
+        let free = evaluate(&state);
+        assert!(
+            (free - locked - (-super::CHOICE_LOCKED_STATUS)).abs() < 1e-3,
+            "locked {} vs free {}",
+            locked,
+            free
+        );
+    }
+
+    /// A choice item on a two-status-move wall is a liability vs Leftovers
+    /// (item value 13 vs 9, minus CHOICE_ON_WALL) — unless the mon carries
+    /// Trick, in which case the scarf is ammunition, not a curse.
+    #[test]
+    fn choice_item_on_wall_is_a_liability_unless_trick() {
+        use super::evaluate;
+        use crate::choices::MOVES;
+        use crate::state::{PokemonMoveIndex, State};
+        let mut state = State::default();
+        {
+            let active = state.side_one.get_active();
+            for (slot, id) in [
+                (PokemonMoveIndex::M0, Choices::THUNDERWAVE),
+                (PokemonMoveIndex::M1, Choices::STEALTHROCK),
+                (PokemonMoveIndex::M2, Choices::SLUDGEBOMB),
+            ] {
+                active.moves[&slot].id = id;
+                active.moves[&slot].choice = MOVES.get(&id).unwrap().clone();
+                active.moves[&slot].pp = 10;
+            }
+            active.item = Items::CHOICESCARF;
+        }
+        let scarfed = evaluate(&state);
+        state.side_one.get_active().item = Items::LEFTOVERS;
+        let lefties = evaluate(&state);
+        // scarf - lefties = (13 - 9) + CHOICE_ON_WALL = 4 - 20 = -16
+        assert!(
+            (scarfed - lefties - (4.0 + super::CHOICE_ON_WALL)).abs() < 1e-3,
+            "scarfed {} vs leftovers {}",
+            scarfed,
+            lefties
+        );
+        // adding Trick exempts the holder: scarf is ammo
+        {
+            let active = state.side_one.get_active();
+            active.item = Items::CHOICESCARF;
+            active.moves[&PokemonMoveIndex::M3].id = Choices::TRICK;
+            active.moves[&PokemonMoveIndex::M3].choice =
+                MOVES.get(&Choices::TRICK).unwrap().clone();
+            active.moves[&PokemonMoveIndex::M3].pp = 10;
+        }
+        let with_trick = evaluate(&state);
+        assert!(
+            (with_trick - lefties - 4.0).abs() < 1e-3,
+            "with_trick {} vs leftovers {}",
+            with_trick,
+            lefties
+        );
     }
 
     #[test]
