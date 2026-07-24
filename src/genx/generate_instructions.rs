@@ -2738,7 +2738,7 @@ fn moves_first(
             return SideMovesFirst::SpeedTie;
         }
 
-        match state.trick_room.active {
+        let speed_order = match state.trick_room.active {
             true => {
                 if side_one_effective_speed < side_two_effective_speed {
                     SideMovesFirst::SideOne
@@ -2753,6 +2753,16 @@ fn moves_first(
                     SideMovesFirst::SideTwo
                 }
             }
+        };
+        // Quick Claw: the naturally-second holder moves first 20% of the
+        // time within its priority bracket (works under Trick Room too).
+        // Both-holders cancel; speed ties above are left as plain ties.
+        let s1_claw = side_one_active.item == Items::QUICKCLAW;
+        let s2_claw = side_two_active.item == Items::QUICKCLAW;
+        match speed_order {
+            SideMovesFirst::SideOne if s2_claw && !s1_claw => SideMovesFirst::SideTwoQuickClaw,
+            SideMovesFirst::SideTwo if s1_claw && !s2_claw => SideMovesFirst::SideOneQuickClaw,
+            other => other,
         }
     } else {
         if side_one_choice.priority > side_two_choice.priority {
@@ -4245,6 +4255,108 @@ pub fn generate_instructions_from_move_pair(
 
             // combine both vectors into the final vector
             state_instructions_vec.extend(side_two_moves_first_si);
+        }
+        SideMovesFirst::SideOneQuickClaw => {
+            // side_one's Quick Claw procs 20%: it moves first; else natural
+            // order (side_two first)
+            let mut claw_first_instruction = incoming_instructions.clone();
+            claw_first_instruction.update_percentage(0.2);
+            incoming_instructions.update_percentage(0.8);
+
+            handle_both_moves(
+                state,
+                &mut side_one_choice,
+                &mut side_two_choice,
+                SideReference::SideOne,
+                claw_first_instruction,
+                &mut state_instructions_vec,
+                branch_on_damage,
+            );
+            for state_instruction in state_instructions_vec.iter_mut() {
+                state.apply_instructions(&state_instruction.instruction_list);
+                if !(s1_replacing_fainted_pkmn
+                    || s2_replacing_fainted_pkmn
+                    || state.side_one.force_switch
+                    || state.side_two.force_switch)
+                {
+                    add_end_of_turn_instructions(state, state_instruction, &SideReference::SideOne);
+                }
+                state.reverse_instructions(&state_instruction.instruction_list);
+            }
+
+            let mut natural_order_si = Vec::with_capacity(4);
+            handle_both_moves(
+                state,
+                &mut side_two_choice,
+                &mut side_one_choice,
+                SideReference::SideTwo,
+                incoming_instructions,
+                &mut natural_order_si,
+                branch_on_damage,
+            );
+            for state_instruction in natural_order_si.iter_mut() {
+                state.apply_instructions(&state_instruction.instruction_list);
+                if !(s1_replacing_fainted_pkmn
+                    || s2_replacing_fainted_pkmn
+                    || state.side_one.force_switch
+                    || state.side_two.force_switch)
+                {
+                    add_end_of_turn_instructions(state, state_instruction, &SideReference::SideTwo);
+                }
+                state.reverse_instructions(&state_instruction.instruction_list);
+            }
+            state_instructions_vec.extend(natural_order_si);
+        }
+        SideMovesFirst::SideTwoQuickClaw => {
+            // side_two's Quick Claw procs 20%: it moves first; else natural
+            // order (side_one first)
+            let mut claw_first_instruction = incoming_instructions.clone();
+            claw_first_instruction.update_percentage(0.2);
+            incoming_instructions.update_percentage(0.8);
+
+            handle_both_moves(
+                state,
+                &mut side_two_choice,
+                &mut side_one_choice,
+                SideReference::SideTwo,
+                claw_first_instruction,
+                &mut state_instructions_vec,
+                branch_on_damage,
+            );
+            for state_instruction in state_instructions_vec.iter_mut() {
+                state.apply_instructions(&state_instruction.instruction_list);
+                if !(s1_replacing_fainted_pkmn
+                    || s2_replacing_fainted_pkmn
+                    || state.side_one.force_switch
+                    || state.side_two.force_switch)
+                {
+                    add_end_of_turn_instructions(state, state_instruction, &SideReference::SideTwo);
+                }
+                state.reverse_instructions(&state_instruction.instruction_list);
+            }
+
+            let mut natural_order_si = Vec::with_capacity(4);
+            handle_both_moves(
+                state,
+                &mut side_one_choice,
+                &mut side_two_choice,
+                SideReference::SideOne,
+                incoming_instructions,
+                &mut natural_order_si,
+                branch_on_damage,
+            );
+            for state_instruction in natural_order_si.iter_mut() {
+                state.apply_instructions(&state_instruction.instruction_list);
+                if !(s1_replacing_fainted_pkmn
+                    || s2_replacing_fainted_pkmn
+                    || state.side_one.force_switch
+                    || state.side_two.force_switch)
+                {
+                    add_end_of_turn_instructions(state, state_instruction, &SideReference::SideOne);
+                }
+                state.reverse_instructions(&state_instruction.instruction_list);
+            }
+            state_instructions_vec.extend(natural_order_si);
         }
     }
     state_instructions_vec

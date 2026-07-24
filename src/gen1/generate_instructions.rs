@@ -1694,6 +1694,9 @@ pub fn generate_instructions_from_move_pair(
                 }
             }
         }
+        SideMovesFirst::SideOneQuickClaw | SideMovesFirst::SideTwoQuickClaw => {
+            unreachable!("quick claw ordering is produced by the genx moves_first only")
+        }
         SideMovesFirst::SpeedTie => {
             let mut side_one_moves_first_instruction = incoming_instructions.clone();
             incoming_instructions.update_percentage(0.5);

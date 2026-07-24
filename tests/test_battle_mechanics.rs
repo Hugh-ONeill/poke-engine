@@ -22137,3 +22137,74 @@ fn test_kee_berry_boosts_defense_when_hit_physically() {
     }];
     assert_eq!(expected_instructions, vec_of_instructions);
 }
+
+#[test]
+fn test_quick_claw_branches_move_order() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_two.get_active().item = Items::QUICKCLAW;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::TACKLE,
+        Choices::TACKLE,
+    );
+
+    // 20%: the slower claw holder (side_two) moves first; 80% natural order
+    let expected_instructions = vec![
+        StateInstructions {
+            percentage: 20.0,
+            instruction_list: vec![
+                Instruction::Damage(DamageInstruction {
+                    side_ref: SideReference::SideOne,
+                    damage_amount: 48,
+                }),
+                Instruction::Damage(DamageInstruction {
+                    side_ref: SideReference::SideTwo,
+                    damage_amount: 48,
+                }),
+            ],
+        },
+        StateInstructions {
+            percentage: 80.0,
+            instruction_list: vec![
+                Instruction::Damage(DamageInstruction {
+                    side_ref: SideReference::SideTwo,
+                    damage_amount: 48,
+                }),
+                Instruction::Damage(DamageInstruction {
+                    side_ref: SideReference::SideOne,
+                    damage_amount: 48,
+                }),
+            ],
+        },
+    ];
+    assert_eq!(expected_instructions, vec_of_instructions);
+}
+
+#[test]
+fn test_quick_claw_does_not_jump_priority_brackets() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 105;
+    state.side_two.get_active().speed = 100;
+    state.side_two.get_active().item = Items::QUICKCLAW;
+    state.side_one.get_active().hp = 500;
+    state.side_one.get_active().maxhp = 500;
+    state.side_two.get_active().hp = 500;
+    state.side_two.get_active().maxhp = 500;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::QUICKATTACK,
+        Choices::TACKLE,
+    );
+
+    // priority Quick Attack always resolves before the claw holder's Tackle:
+    // one branch only, no claw split
+    assert_eq!(1, vec_of_instructions.len());
+    match &vec_of_instructions[0].instruction_list[0] {
+        Instruction::Damage(d) => assert_eq!(d.side_ref, SideReference::SideTwo),
+        other => panic!("expected side_two damaged first, got {:?}", other),
+    }
+}

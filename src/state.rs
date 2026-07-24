@@ -134,7 +134,11 @@ define_enum_with_from_str! {
     SideMovesFirst {
         SideOne,
         SideTwo,
-        SpeedTie
+        SpeedTie,
+        // Quick Claw on the naturally-second side: 20% that side first,
+        // 80% natural order (gen9 fork, 2026-07-24)
+        SideOneQuickClaw,
+        SideTwoQuickClaw
     }
 }
 
