@@ -967,6 +967,29 @@ pub fn ability_after_damage_hit(
                 );
             }
         }
+        Abilities::ANGERSHELL => {
+            // crossing below 50% HP from a hit: +1 atk/spa/spe, -1 def/spd
+            // (2026-07-26 silent-ability scan). Same threshold shape as
+            // Berserk above.
+            if damage_dealt > 0
+                && defending_pkmn.hp < defending_pkmn.maxhp / 2
+                && defending_pkmn.hp + damage_dealt >= defending_pkmn.maxhp / 2
+            {
+                let def_ref = side_ref.get_other_side();
+                for (stat, amt) in [
+                    (PokemonBoostableStat::Attack, 1),
+                    (PokemonBoostableStat::SpecialAttack, 1),
+                    (PokemonBoostableStat::Speed, 1),
+                    (PokemonBoostableStat::Defense, -1),
+                    (PokemonBoostableStat::SpecialDefense, -1),
+                ] {
+                    apply_boost_instruction(
+                        defending_side, &stat, &amt, &def_ref, &def_ref,
+                        instructions,
+                    );
+                }
+            }
+        }
         Abilities::ROUGHSKIN | Abilities::IRONBARBS => {
             if damage_dealt > 0 && choice.flags.contact {
                 #[cfg(feature = "gen3")]

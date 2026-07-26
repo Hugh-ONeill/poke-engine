@@ -22208,3 +22208,96 @@ fn test_quick_claw_does_not_jump_priority_brackets() {
         other => panic!("expected side_two damaged first, got {:?}", other),
     }
 }
+
+#[test]
+fn test_rock_head_negates_recoil() {
+    // Double-Edge with Rock Head: the attacker takes no recoil damage.
+    let mut state = State::default();
+    state.side_one.get_active().ability = Abilities::ROCKHEAD;
+    state.side_one.get_active().speed = 200;
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::DOUBLEEDGE,
+        Choices::SPLASH,
+    );
+    let recoil_on_self = vec_of_instructions.iter().any(|si| {
+        si.instruction_list.iter().any(|i| matches!(
+            i, Instruction::Damage(d) if d.side_ref == SideReference::SideOne))
+    });
+    assert!(!recoil_on_self, "Rock Head should negate recoil");
+}
+
+#[test]
+fn test_rock_head_off_still_recoils() {
+    let mut state = State::default();
+    state.side_one.get_active().speed = 200;
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::DOUBLEEDGE,
+        Choices::SPLASH,
+    );
+    let recoil_on_self = vec_of_instructions.iter().any(|si| {
+        si.instruction_list.iter().any(|i| matches!(
+            i, Instruction::Damage(d) if d.side_ref == SideReference::SideOne))
+    });
+    assert!(recoil_on_self, "without Rock Head, Double-Edge should recoil");
+}
+
+#[test]
+fn test_synchronize_reflects_paralysis() {
+    // side_one Thunder Waves a Synchronize holder -> side_one also paralyzed.
+    let mut state = State::default();
+    state.side_two.get_active().ability = Abilities::SYNCHRONIZE;
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::THUNDERWAVE,
+        Choices::SPLASH,
+    );
+    let reflected = vec_of_instructions.iter().any(|si| {
+        si.instruction_list.iter().any(|i| matches!(
+            i, Instruction::ChangeStatus(c)
+                if c.side_ref == SideReference::SideOne
+                    && c.new_status == PokemonStatus::PARALYZE))
+    });
+    assert!(reflected, "Synchronize should reflect paralysis to the attacker");
+}
+
+#[test]
+fn test_poison_puppeteer_confuses_poisoned_foe() {
+    let mut state = State::default();
+    state.side_one.get_active().ability = Abilities::POISONPUPPETEER;
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::TOXIC,
+        Choices::SPLASH,
+    );
+    let confused = vec_of_instructions.iter().any(|si| {
+        si.instruction_list.iter().any(|i| matches!(
+            i, Instruction::ApplyVolatileStatus(v)
+                if v.side_ref == SideReference::SideTwo
+                    && v.volatile_status == PokemonVolatileStatus::CONFUSION))
+    });
+    assert!(confused, "Poison Puppeteer should confuse the poisoned foe");
+}
+
+#[test]
+fn test_anger_shell_boosts_crossing_half_hp() {
+    // a hit that drops the Anger Shell holder below 50% triggers the shift.
+    let mut state = State::default();
+    state.side_two.get_active().ability = Abilities::ANGERSHELL;
+    state.side_two.get_active().hp = 101;
+    state.side_two.get_active().maxhp = 200;   // just above half
+    state.side_one.get_active().speed = 200;
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::TACKLE,
+        Choices::SPLASH,
+    );
+    let boosted = vec_of_instructions.iter().any(|si| {
+        si.instruction_list.iter().any(|i| matches!(
+            i, Instruction::Boost(b)
+                if b.side_ref == SideReference::SideTwo
+                    && b.stat == PokemonBoostableStat::Attack && b.amount == 1))
+    });
+    assert!(boosted, "Anger Shell should +Atk when crossing below half HP");
+}

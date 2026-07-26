@@ -854,6 +854,76 @@ fn get_instructions_from_status_effects(
         })
     };
     incoming_instructions.instruction_list.push(instruction);
+
+    // The two below only fire when the OPPONENT inflicted the status (a move
+    // statusing its target), never on self-inflicted status (Rest, orbs).
+    if status.target != MoveTarget::Opponent {
+        return;
+    }
+
+    // Synchronize: the statused mon reflects a major status back onto the
+    // attacker that inflicted it (gen9: burn/poison/toxic/paralyze; not
+    // sleep/freeze). 2026-07-26 silent-ability scan.
+    let target_has_sync = state
+        .get_side(&target_side_ref)
+        .get_active_immutable()
+        .ability
+        == Abilities::SYNCHRONIZE;
+    if target_has_sync
+        && matches!(
+            status.status,
+            PokemonStatus::BURN
+                | PokemonStatus::POISON
+                | PokemonStatus::TOXIC
+                | PokemonStatus::PARALYZE
+        )
+        && !immune_to_status(
+            state,
+            &MoveTarget::User,
+            attacking_side_reference,
+            &status.status,
+        )
+    {
+        let atk_side = state.get_side(attacking_side_reference);
+        let atk_index = atk_side.active_index;
+        let atk_pkmn = atk_side.get_active();
+        let old = atk_pkmn.status;
+        atk_pkmn.status = status.status;
+        incoming_instructions
+            .instruction_list
+            .push(Instruction::ChangeStatus(ChangeStatusInstruction {
+                side_ref: *attacking_side_reference,
+                pokemon_index: atk_index,
+                old_status: old,
+                new_status: status.status,
+            }));
+    }
+
+    // Poison Puppeteer (Pecharunt): a foe it poisons is also confused.
+    let attacker_puppeteer = state
+        .get_side(attacking_side_reference)
+        .get_active_immutable()
+        .ability
+        == Abilities::POISONPUPPETEER;
+    if attacker_puppeteer
+        && matches!(status.status, PokemonStatus::POISON | PokemonStatus::TOXIC)
+    {
+        let tgt = state.get_side(&target_side_ref);
+        if tgt.get_active_immutable().hp > 0
+            && !tgt
+                .volatile_statuses
+                .contains(&PokemonVolatileStatus::CONFUSION)
+        {
+            tgt.volatile_statuses
+                .insert(PokemonVolatileStatus::CONFUSION);
+            incoming_instructions.instruction_list.push(
+                Instruction::ApplyVolatileStatus(ApplyVolatileStatusInstruction {
+                    side_ref: target_side_ref,
+                    volatile_status: PokemonVolatileStatus::CONFUSION,
+                }),
+            );
+        }
+    }
 }
 
 pub fn get_boost_amount(side: &Side, boost: &PokemonBoostableStat, amount: i8) -> i8 {
@@ -1544,7 +1614,11 @@ fn generate_instructions_from_damage(
         }
 
         let attacking_pokemon = state.get_side(attacking_side_ref).get_active();
-        if let Some(recoil_fraction) = choice.recoil {
+        // Rock Head negates recoil (we were WRONGLY applying it to Head
+        // Smash / Flare Blitz / etc. users — 2026-07-26 silent-ability scan)
+        if let Some(recoil_fraction) = choice.recoil
+            .filter(|_| attacking_pokemon.ability != Abilities::ROCKHEAD)
+        {
             let recoil_amount = (damage_dealt as f32 * recoil_fraction) as i16;
             let damage_amount = cmp::min(recoil_amount, attacking_pokemon.hp);
             let recoil_instruction = Instruction::Damage(DamageInstruction {
