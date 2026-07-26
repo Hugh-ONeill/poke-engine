@@ -1053,6 +1053,28 @@ impl State {
         immune_to_status(&hypo, &MoveTarget::Opponent, &SideReference::SideTwo, status)
     }
 
+    /// Every options list handed to MCTS must be non-empty: Node::expand
+    /// indexes `[move_index]` and populate builds one child per entry, so an
+    /// empty side panics (mcts.rs:240, "index 0 into len 0"). The final
+    /// return of get_all_options guards this, but the force_switch early
+    /// returns did NOT — a forced switch with no alive reserves (a faint
+    /// with an empty bench, or an Eject/Red Card fire in a search branch
+    /// that already lost its reserves) returned an empty vec and crashed the
+    /// search. This restores the "no legal action" -> MoveChoice::None
+    /// invariant on those paths.
+    fn guarded_options(
+        mut s1: Vec<MoveChoice>,
+        mut s2: Vec<MoveChoice>,
+    ) -> (Vec<MoveChoice>, Vec<MoveChoice>) {
+        if s1.is_empty() {
+            s1.push(MoveChoice::None);
+        }
+        if s2.is_empty() {
+            s2.push(MoveChoice::None);
+        }
+        (s1, s2)
+    }
+
     pub fn get_all_options(&self) -> (Vec<MoveChoice>, Vec<MoveChoice>) {
         let mut side_one_options: Vec<MoveChoice> = Vec::with_capacity(9);
         let mut side_two_options: Vec<MoveChoice> = Vec::with_capacity(9);
@@ -1070,7 +1092,7 @@ impl State {
                     self.side_two.switch_out_move_second_saved_move,
                 );
             }
-            return (side_one_options, side_two_options);
+            return Self::guarded_options(side_one_options, side_two_options);
         }
 
         if self.side_two.force_switch {
@@ -1083,7 +1105,7 @@ impl State {
                     self.side_one.switch_out_move_second_saved_move,
                 );
             }
-            return (side_one_options, side_two_options);
+            return Self::guarded_options(side_one_options, side_two_options);
         }
 
         let side_one_force_switch = self.side_one.get_active_immutable().hp <= 0;
@@ -1092,17 +1114,17 @@ impl State {
         if side_one_force_switch && side_two_force_switch {
             self.side_one.add_switches(&mut side_one_options);
             self.side_two.add_switches(&mut side_two_options);
-            return (side_one_options, side_two_options);
+            return Self::guarded_options(side_one_options, side_two_options);
         }
         if side_one_force_switch {
             self.side_one.add_switches(&mut side_one_options);
             side_two_options.push(MoveChoice::None);
-            return (side_one_options, side_two_options);
+            return Self::guarded_options(side_one_options, side_two_options);
         }
         if side_two_force_switch {
             side_one_options.push(MoveChoice::None);
             self.side_two.add_switches(&mut side_two_options);
-            return (side_one_options, side_two_options);
+            return Self::guarded_options(side_one_options, side_two_options);
         }
 
         if self
