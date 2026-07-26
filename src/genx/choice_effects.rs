@@ -1211,6 +1211,14 @@ pub fn choice_hazard_clear(
     }
 }
 
+// NOT IMPLEMENTED — random / move-calling moves (METRONOME, NATURE POWER,
+// ASSIST, COPYCAT, MIRROR MOVE) have no special handling: they fall through
+// to their inert base data, effectively doing nothing. Modeling them
+// correctly means BRANCHING over the set of moves they could become
+// (Metronome ~all moves = a combinatorial blow-up that would need a sampled
+// approximation, not full enumeration). None see meaningful gen9 OU usage
+// (Metronome is a meme), so this is deferred indefinitely — the high-usage
+// OU movepool is fully implemented; only these niche redirectors are silent.
 pub fn choice_special_effect(
     state: &mut State,
     choice: &mut Choice,

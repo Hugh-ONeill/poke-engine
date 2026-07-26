@@ -967,6 +967,15 @@ pub fn ability_after_damage_hit(
                 );
             }
         }
+        // NOT IMPLEMENTED — Cursed Body (Gengar): 30% chance on being hit by
+        // a contact move to disable that move. Deferred because this hook
+        // applies deterministic effects to a single StateInstructions, and a
+        // 30% outcome needs a probability BRANCH (a disabled and a
+        // not-disabled successor). The move-generation branching happens
+        // upstream via secondaries, not here, so wiring a chance-based
+        // defender reaction needs plumbing beyond this function. See the
+        // silent-ability TODO. (Frequency: Gengar is common OU, so this is
+        // the highest-value of the deferred abilities to eventually add.)
         Abilities::ANGERSHELL => {
             // crossing below 50% HP from a hit: +1 atk/spa/spe, -1 def/spd
             // (2026-07-26 silent-ability scan). Same threshold shape as
@@ -1475,6 +1484,17 @@ pub fn ability_end_of_turn(
     }
 }
 
+// NOT IMPLEMENTED — a few switch-in / passive abilities are intentionally
+// left silent (2026-07-26 silent-ability scan; see the project memory):
+//   ILLUSION (Zoroark): the mon appears as its last teammate until it takes
+//     damage. This is an INFORMATION-hiding effect (the opponent sees the
+//     wrong species), not a state-mechanics effect, so it belongs in the
+//     translator/belief layer, not here — and Zoroark is niche in OU.
+//     Currently handled by discounting Zoroark benches rather than modeling.
+//   FRISK / ANTICIPATION / FOREWARN: reveal the opponent's item / strong
+//     moves. Pure information — no battle-state effect to simulate — and
+//     usage is fringe (Frisk lives on Dusclops/Dusknoir/Banette), so the
+//     set-inference plumbing to consume the reveal isn't worth it yet.
 pub fn ability_on_switch_in(
     state: &mut State,
     side_ref: &SideReference,
