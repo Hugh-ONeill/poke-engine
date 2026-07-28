@@ -39,6 +39,7 @@ struct EvalOff {
     synergy: bool,
     threatv2: bool,
     locks: bool,
+    unaware: bool,
     baseline: bool,
 }
 
@@ -82,6 +83,11 @@ impl EvalOff {
             // disables. The TWave-lock breaking was verified all along
             // (max consecutive run 27 -> <13, fp control unchanged).
             locks: has("locks"),
+            // Unaware negates the atk/def/spatk/spdef boost credit against (or
+            // held-against) an Unaware active — a truth claim mirroring
+            // damage_calc's Unaware handling, default-ON. CB_EVAL_OFF=unaware
+            // reverts to crediting boosts the mechanic makes worthless.
+            unaware: has("unaware"),
             baseline: all,
         }
     }
@@ -1040,6 +1046,32 @@ pub fn evaluate(state: &State) -> f32 {
     } else {
         threat_vs(s2_active, s1_active)
     };
+    // Unaware ignores stat stages when dealing AND taking damage, so an
+    // Unaware active makes the OTHER side's atk/def/spatk/spdef boosts
+    // worthless (offensive boosts do nothing INTO it; defensive boosts do
+    // nothing against ITS hits). Zero the damage-boost credit accordingly,
+    // mirroring damage_calc's `defender/attacker == UNAWARE && other !=
+    // MOLDBREAKER`. Speed is untouched (Unaware only ignores damage stats).
+    let s1_dmg_boost = if !off.unaware
+        && s2_active.ability == Abilities::UNAWARE
+        && s1_active.ability != Abilities::MOLDBREAKER
+    {
+        0.0
+    } else {
+        1.0
+    };
+    let s2_dmg_boost = if !off.unaware
+        && s1_active.ability == Abilities::UNAWARE
+        && s2_active.ability != Abilities::MOLDBREAKER
+    {
+        0.0
+    } else {
+        1.0
+    };
+    // Under Trick Room a speed BOOST is a liability (you move last), so its
+    // credit flips sign — the flat boost credit was missing the TR reversal
+    // that the SPEED_TIER term and weather-speed abilities already apply.
+    let speed_boost_sign = if state.trick_room.active { -1.0 } else { 1.0 };
 
     let mut iter = state.side_one.pokemon.into_iter();
     let mut s1_used_tera = false;
@@ -1057,13 +1089,15 @@ pub fn evaluate(state: &State) -> f32 {
                 }
 
                 score += get_boost_multiplier(state.side_one.attack_boost)
-                    * POKEMON_ATTACK_BOOST * s1_phys;
-                score += get_boost_multiplier(state.side_one.defense_boost) * POKEMON_DEFENSE_BOOST;
+                    * POKEMON_ATTACK_BOOST * s1_phys * s1_dmg_boost;
+                score += get_boost_multiplier(state.side_one.defense_boost)
+                    * POKEMON_DEFENSE_BOOST * s1_dmg_boost;
                 score += get_boost_multiplier(state.side_one.special_attack_boost)
-                    * POKEMON_SPECIAL_ATTACK_BOOST * s1_spec;
+                    * POKEMON_SPECIAL_ATTACK_BOOST * s1_spec * s1_dmg_boost;
                 score += get_boost_multiplier(state.side_one.special_defense_boost)
-                    * POKEMON_SPECIAL_DEFENSE_BOOST;
-                score += get_boost_multiplier(state.side_one.speed_boost) * POKEMON_SPEED_BOOST;
+                    * POKEMON_SPECIAL_DEFENSE_BOOST * s1_dmg_boost;
+                score += get_boost_multiplier(state.side_one.speed_boost)
+                    * POKEMON_SPEED_BOOST * speed_boost_sign;
             }
         }
         if pkmn.terastallized {
@@ -1090,13 +1124,15 @@ pub fn evaluate(state: &State) -> f32 {
                 }
 
                 score -= get_boost_multiplier(state.side_two.attack_boost)
-                    * POKEMON_ATTACK_BOOST * s2_phys;
-                score -= get_boost_multiplier(state.side_two.defense_boost) * POKEMON_DEFENSE_BOOST;
+                    * POKEMON_ATTACK_BOOST * s2_phys * s2_dmg_boost;
+                score -= get_boost_multiplier(state.side_two.defense_boost)
+                    * POKEMON_DEFENSE_BOOST * s2_dmg_boost;
                 score -= get_boost_multiplier(state.side_two.special_attack_boost)
-                    * POKEMON_SPECIAL_ATTACK_BOOST * s2_spec;
+                    * POKEMON_SPECIAL_ATTACK_BOOST * s2_spec * s2_dmg_boost;
                 score -= get_boost_multiplier(state.side_two.special_defense_boost)
-                    * POKEMON_SPECIAL_DEFENSE_BOOST;
-                score -= get_boost_multiplier(state.side_two.speed_boost) * POKEMON_SPEED_BOOST;
+                    * POKEMON_SPECIAL_DEFENSE_BOOST * s2_dmg_boost;
+                score -= get_boost_multiplier(state.side_two.speed_boost)
+                    * POKEMON_SPEED_BOOST * speed_boost_sign;
             }
         }
         if pkmn.terastallized {
@@ -1333,6 +1369,55 @@ mod tests {
         assert!(!super::choice_locked_into_status(
             state.side_one.get_active_immutable()
         ));
+    }
+
+    /// Unaware ignores stat stages when dealing/taking damage, so the eval must
+    /// NOT credit atk/def/spatk/spdef boosts against (or held against) an
+    /// Unaware active — mirroring damage_calc. Uses the flat-credited defensive
+    /// boost so no move setup is needed. Mold Breaker lifts it (damage_calc's
+    /// same `!= MOLDBREAKER` guard).
+    #[test]
+    fn unaware_active_zeroes_damage_boost_credit() {
+        use super::evaluate;
+        use crate::state::State;
+        let mut state = State::default();
+        state.side_one.defense_boost = 2;
+        state.side_one.get_active().ability = Abilities::TORRENT;
+        state.side_two.get_active().ability = Abilities::TORRENT; // non-Unaware attacker
+        let credited = evaluate(&state);
+        state.side_two.get_active().ability = Abilities::UNAWARE; // ignores our Def boost
+        let negated = evaluate(&state);
+        assert!(
+            credited > negated,
+            "Unaware attacker must zero our defensive-boost credit: {} !> {}",
+            credited, negated
+        );
+        // Mold Breaker on our (defending) side bypasses it, matching damage_calc.
+        state.side_one.get_active().ability = Abilities::MOLDBREAKER;
+        let moldbroken = evaluate(&state);
+        assert!(
+            (moldbroken - credited).abs() < 0.5,
+            "Mold Breaker should bypass the Unaware negation: {} vs {}",
+            moldbroken, credited
+        );
+    }
+
+    /// Under Trick Room a speed boost is a liability, so its eval credit flips
+    /// sign — the flat boost credit had missed the reversal SPEED_TIER applies.
+    #[test]
+    fn trick_room_flips_speed_boost_credit() {
+        use super::evaluate;
+        use crate::state::State;
+        let mut state = State::default();
+        state.side_one.speed_boost = 2;
+        let normal = evaluate(&state);
+        state.trick_room.active = true;
+        let under_tr = evaluate(&state);
+        assert!(
+            normal > under_tr,
+            "speed boost should be worth LESS under Trick Room: {} vs {}",
+            normal, under_tr
+        );
     }
 
     /// A choice item on a two-status-move wall is a liability vs Leftovers
