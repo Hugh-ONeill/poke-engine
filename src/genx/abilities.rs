@@ -1524,8 +1524,12 @@ pub fn ability_on_switch_in(
 
     match active_pkmn.ability {
         Abilities::ICEFACE => {
-            if active_pkmn.id == PokemonName::EISCUENOICE && state.weather_is_active(&Weather::HAIL)
-                || state.weather_is_active(&Weather::SNOW)
+            // parens matter: without them this parsed as (NOICE && HAIL) || SNOW,
+            // so under snow an Eiscue ALREADY in Ice Face emitted a zero-delta
+            // FormeChange + stat recalc every end of turn (found 2026-07-30)
+            if active_pkmn.id == PokemonName::EISCUENOICE
+                && (state.weather_is_active(&Weather::HAIL)
+                    || state.weather_is_active(&Weather::SNOW))
             {
                 let active_pkmn = state.get_side(side_ref).get_active();
                 instructions.instruction_list.push(Instruction::FormeChange(

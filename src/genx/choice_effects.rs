@@ -258,7 +258,9 @@ pub fn modify_choice(
 
         Choices::MORNINGSUN | Choices::MOONLIGHT | Choices::SYNTHESIS => {
             match state.weather.weather_type {
-                Weather::SUN => {
+                // Desolate Land counts as sun for these (was falling into the
+                // any-other-weather 1/4 arm)
+                Weather::SUN | Weather::HARSHSUN => {
                     attacker_choice.heal = Some(Heal {
                         target: MoveTarget::User,
                         amount: 0.667,
