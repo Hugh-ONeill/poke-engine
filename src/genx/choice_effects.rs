@@ -440,7 +440,10 @@ pub fn modify_choice(
             }
         }
         Choices::BLIZZARD => {
-            if state.weather_is_active(&Weather::HAIL) {
+            // perfect accuracy in hail AND gen9 snow
+            if state.weather_is_active(&Weather::HAIL)
+                || state.weather_is_active(&Weather::SNOW)
+            {
                 attacker_choice.accuracy = 100.0;
             }
         }

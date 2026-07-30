@@ -14813,6 +14813,32 @@ fn test_heatcrash_highest_base_power() {
 
 #[test]
 #[cfg(feature = "gen9")]
+fn test_blizzard_perfect_accuracy_in_snow() {
+    // gen9 snow grants Blizzard perfect accuracy (the HAIL-only gate left it
+    // at 70% under SNOW until 2026-07-30): every branch lands the hit — the
+    // remaining split is the freeze secondary, not accuracy
+    let mut state = State::default();
+    state.weather.weather_type = Weather::SNOW;
+
+    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
+        &mut state,
+        Choices::BLIZZARD,
+        Choices::SPLASH,
+    );
+
+    for si in &vec_of_instructions {
+        assert!(
+            si.instruction_list.iter().any(|i| matches!(i,
+                Instruction::Damage(d)
+                    if d.side_ref == SideReference::SideTwo && d.damage_amount > 50)),
+            "found a miss branch — Blizzard must be perfect in SNOW: {:?}",
+            vec_of_instructions
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "gen9")]
 fn test_blizzard_in_hail() {
     let mut state = State::default();
     state.weather.weather_type = Weather::HAIL;

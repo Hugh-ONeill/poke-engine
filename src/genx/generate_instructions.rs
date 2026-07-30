@@ -2658,7 +2658,13 @@ fn get_effective_speed(state: &State, side_reference: &SideReference) -> i16 {
             boosted_speed *= 2.0
         }
         Weather::SAND if active_pkmn.ability == Abilities::SANDRUSH => boosted_speed *= 2.0,
-        Weather::HAIL if active_pkmn.ability == Abilities::SLUSHRUSH => boosted_speed *= 2.0,
+        // gen9's Snow Warning sets SNOW, not HAIL — a HAIL-only arm left Slush
+        // Rush a silent no-op in the gen9 build while the EVAL still awarded
+        // its weather speed bonus (found 2026-07-30; same class as the
+        // Imposter/Stance Change batch)
+        Weather::HAIL | Weather::SNOW if active_pkmn.ability == Abilities::SLUSHRUSH => {
+            boosted_speed *= 2.0
+        }
         _ => {}
     }
 
@@ -9541,6 +9547,39 @@ mod tests {
                 &mut StateInstructions::default()
             )
         )
+    }
+
+    /// gen9's Snow Warning sets SNOW, not HAIL — these three snow mechanics
+    /// were HAIL-only no-ops in the gen9 build until 2026-07-30 (Slush Rush
+    /// while the EVAL awarded its speed bonus: an eval-vs-mechanics
+    /// contradiction, the worst variant of the silent-ability class).
+    #[test]
+    fn test_slush_rush_doubles_speed_in_snow() {
+        let mut state = State::default();
+        state.weather.weather_type = Weather::SNOW;
+        let base = get_effective_speed(&state, &SideReference::SideOne);
+        state.side_one.get_active().ability = Abilities::SLUSHRUSH;
+        let rushed = get_effective_speed(&state, &SideReference::SideOne);
+        assert_eq!(rushed, base * 2,
+                   "Slush Rush must double speed under gen9 SNOW");
+    }
+
+    #[test]
+    fn test_ice_body_heals_in_snow() {
+        let mut state = State::default();
+        state.weather.weather_type = Weather::SNOW;
+        state.side_one.get_active().ability = Abilities::ICEBODY;
+        state.side_one.get_active().hp = 50;
+        let mut incoming = StateInstructions::default();
+        add_end_of_turn_instructions(
+            &mut state, &mut incoming, &SideReference::SideOne);
+        assert!(
+            incoming.instruction_list.iter().any(|i| matches!(i,
+                Instruction::Heal(h)
+                    if h.side_ref == SideReference::SideOne && h.heal_amount > 0)),
+            "Ice Body must heal under gen9 SNOW: {:?}",
+            incoming.instruction_list
+        );
     }
 
     #[test]
