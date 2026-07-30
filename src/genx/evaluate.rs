@@ -40,6 +40,7 @@ struct EvalOff {
     threatv2: bool,
     locks: bool,
     unaware: bool,
+    supremeoverlord: bool,
     baseline: bool,
 }
 
@@ -88,6 +89,7 @@ impl EvalOff {
             // damage_calc's Unaware handling, default-ON. CB_EVAL_OFF=unaware
             // reverts to crediting boosts the mechanic makes worthless.
             unaware: has("unaware"),
+            supremeoverlord: has("supremeoverlord"),
             baseline: all,
         }
     }
@@ -523,7 +525,7 @@ fn threat_ability_bp_mult(ability: &Abilities, choice: &Choice) -> f32 {
     }
 }
 
-fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
+fn threat_vs(attacker: &Pokemon, defender: &Pokemon, attacker_fainted: usize) -> (f32, f32, bool) {
     let mut best_phys: f32 = 0.0;
     let mut best_spec: f32 = 0.0;
     let mut has_status = false;
@@ -553,8 +555,23 @@ fn threat_vs(attacker: &Pokemon, defender: &Pokemon) -> (f32, f32, bool) {
     } else {
         1.0
     };
-    let atk_stat = attacker.attack as f32 * atk_mult;
-    let spa_stat = attacker.special_attack as f32 * spa_mult;
+    // Supreme Overlord multiplies every move's base power by 1 + 0.1 x (own
+    // fainted allies) in the damage calc (abilities.rs) — mirror it as a stat
+    // multiplier, which is identical since damage is linear in BP x Atk and
+    // the boost applies uniformly across the moveset. Lives OUTSIDE the v2
+    // bp-mult mirror: it needs side state (fainted count) and is a default-ON
+    // truth claim, not part of the parked threatv2 bundle. Without it the eval
+    // read an endgame Kingambit as its turn-1 self, never pricing the
+    // cleaner's scaling (CB_EVAL_OFF=supremeoverlord reverts).
+    let so_mult = if attacker.ability == Abilities::SUPREMEOVERLORD
+        && !eval_off().supremeoverlord
+    {
+        1.0 + 0.1 * attacker_fainted as f32
+    } else {
+        1.0
+    };
+    let atk_stat = attacker.attack as f32 * atk_mult * so_mult;
+    let spa_stat = attacker.special_attack as f32 * spa_mult * so_mult;
     let def_stat = defender.defense.max(1) as f32;
     let spd_stat = defender.special_defense.max(1) as f32;
     for mv in attacker.moves.into_iter() {
@@ -1039,12 +1056,12 @@ pub fn evaluate(state: &State) -> f32 {
     let (s1_phys, s1_spec, s1_has_status) = if off.threat {
         (1.0, 1.0, true)
     } else {
-        threat_vs(s1_active, s2_active)
+        threat_vs(s1_active, s2_active, state.side_one.num_fainted_pkmn() as usize)
     };
     let (s2_phys, s2_spec, s2_has_status) = if off.threat {
         (1.0, 1.0, true)
     } else {
-        threat_vs(s2_active, s1_active)
+        threat_vs(s2_active, s1_active, state.side_two.num_fainted_pkmn() as usize)
     };
     // Unaware ignores stat stages when dealing AND taking damage, so an
     // Unaware active makes the OTHER side's atk/def/spatk/spdef boosts
@@ -1399,6 +1416,48 @@ mod tests {
             (moldbroken - credited).abs() < 0.5,
             "Mold Breaker should bypass the Unaware negation: {} vs {}",
             moldbroken, credited
+        );
+    }
+
+    /// Supreme Overlord's fallen-ally scaling must reach the eval's threat
+    /// model: with allies down, a Supreme Overlord attacker's boosts convert
+    /// harder. Measured as a difference-in-differences (SO vs a neutral
+    /// ability, fresh vs two-fainted) so the fainted-ally scoring itself
+    /// cancels out.
+    #[test]
+    fn supreme_overlord_scales_threat_with_fallen_allies() {
+        use super::evaluate;
+        use crate::state::{PokemonIndex, State};
+        use crate::state::PokemonMoveIndex;
+        let eval_with = |ability: Abilities, faint_two: bool| -> f32 {
+            let mut state = State::default();
+            state.side_one.attack_boost = 2; // boost credit rides s1_phys
+            state.side_one.get_active().ability = ability;
+            // a real physical move (default mons have none -> s1_phys = 0),
+            // against a defender bulky enough that the threat score sits
+            // below the 2HKO clamp where the multiplier is visible
+            state
+                .side_one
+                .get_active()
+                .replace_move(PokemonMoveIndex::M0, Choices::TACKLE);
+            state.side_two.get_active().maxhp = 400;
+            state.side_two.get_active().hp = 400;
+            state.side_two.get_active().defense = 300;
+            if faint_two {
+                state.side_one.pokemon[PokemonIndex::P1].hp = 0;
+                state.side_one.pokemon[PokemonIndex::P2].hp = 0;
+            }
+            evaluate(&state)
+        };
+        let d_fresh =
+            eval_with(Abilities::SUPREMEOVERLORD, false) - eval_with(Abilities::TORRENT, false);
+        let d_loaded =
+            eval_with(Abilities::SUPREMEOVERLORD, true) - eval_with(Abilities::TORRENT, true);
+        assert!(
+            d_loaded > d_fresh + 0.5,
+            "two fallen allies must raise a Supreme Overlord attacker's \
+             boost-threat credit: loaded delta {} !> fresh delta {}",
+            d_loaded, d_fresh
         );
     }
 
