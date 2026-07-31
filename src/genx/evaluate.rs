@@ -41,6 +41,7 @@ struct EvalOff {
     locks: bool,
     unaware: bool,
     supremeoverlord: bool,
+    weatherteam: bool,
     baseline: bool,
 }
 
@@ -90,6 +91,8 @@ impl EvalOff {
             // reverts to crediting boosts the mechanic makes worthless.
             unaware: has("unaware"),
             supremeoverlord: has("supremeoverlord"),
+            // default-OFF (threatv2 pattern): arm with CB_EVAL_ON=weatherteam
+            weatherteam: !has_on("weatherteam"),
             baseline: all,
         }
     }
@@ -308,6 +311,21 @@ const TERRAIN_MISTY_DRAGON_RESIST: f32 = 4.0;
 const TERRAIN_ELECTRIC_SLEEP_BLOCK: f32 = 8.0;
 const TERRAIN_PSYCHIC_PRIORITY_BLOCK: f32 = 4.0;
 const TERRAIN_TYPE_BOOSTED: f32 = 5.0;
+
+// Fork-added (2026-07-31): the active-mon terms above are the eval's ONLY
+// field pricing, so a benched Swift Swim sweeper contributed zero and
+// restoring a downed field never paid at the leaf. Measured: the search
+// declined the roles-demanded setter switch at median 44.8pp visit-share
+// margin, and 20k-visit advocate searches CONFIRMED the decline 95% of the
+// time (showdown/advocate_study.py) — the value is invisible to this eval,
+// not under-explored. Two team-scope terms, default-OFF behind
+// CB_EVAL_ON=weatherteam until the paired A/B on a weather-heavy suite:
+// benched exploiters earn their field value at a discount (it materializes
+// on entry), and an alive setter of a currently-down field banks a fraction
+// of the team's would-be value under it (the resource; losing the setter
+// forfeits it, switching it in converts the fraction into the full rate).
+const BENCH_FIELD_SCALE: f32 = 0.35;
+const SETTER_RESOURCE_SCALE: f32 = 0.20;
 
 // Pending side-level effects (stored on the side that benefits).
 const WISH_PENDING: f32 = 15.0;
@@ -856,6 +874,107 @@ fn evaluate_weather_for_active(pokemon: &Pokemon, weather: Weather, trick_room: 
     score
 }
 
+fn weather_a_setter_would_bring(ability: &Abilities) -> Option<Weather> {
+    match ability {
+        Abilities::DRIZZLE => Some(Weather::RAIN),
+        Abilities::DROUGHT | Abilities::ORICHALCUMPULSE => Some(Weather::SUN),
+        Abilities::SANDSTREAM => Some(Weather::SAND),
+        Abilities::SNOWWARNING => Some(Weather::SNOW),
+        _ => None,
+    }
+}
+
+fn terrain_a_setter_would_bring(ability: &Abilities) -> Option<Terrain> {
+    match ability {
+        Abilities::GRASSYSURGE => Some(Terrain::GRASSYTERRAIN),
+        Abilities::ELECTRICSURGE | Abilities::HADRONENGINE => {
+            Some(Terrain::ELECTRICTERRAIN)
+        }
+        Abilities::PSYCHICSURGE => Some(Terrain::PSYCHICTERRAIN),
+        Abilities::MISTYSURGE => Some(Terrain::MISTYTERRAIN),
+        _ => None,
+    }
+}
+
+// Team-scope field value for one side — see the BENCH_FIELD_SCALE comment.
+fn evaluate_side_field_team(
+    side: &Side,
+    weather: Weather,
+    terrain: Terrain,
+    trick_room: bool,
+) -> f32 {
+    let mut score = 0.0;
+
+    // benched exploiters: the field's value for them materializes on entry
+    let mut iter = side.pokemon.into_iter();
+    while let Some(p) = iter.next() {
+        if iter.pokemon_index == side.active_index || p.hp <= 0 {
+            continue;
+        }
+        if weather != Weather::NONE {
+            score += BENCH_FIELD_SCALE
+                * evaluate_weather_for_active(p, weather, trick_room);
+        }
+        if terrain != Terrain::NONE {
+            score += BENCH_FIELD_SCALE
+                * evaluate_terrain_for_active(p, terrain, trick_room);
+        }
+    }
+
+    // an alive setter of a field that is NOT currently up banks a fraction of
+    // the team's would-be value under it. Only a POSITIVE would-be value is
+    // banked: preserving a sand setter whose own team hates sand is not a
+    // resource. The active is included in the would-be sum — post-restore it
+    // benefits at the full rate too.
+    let mut setter_weather: Option<Weather> = None;
+    let mut setter_terrain: Option<Terrain> = None;
+    let mut iter = side.pokemon.into_iter();
+    while let Some(p) = iter.next() {
+        if p.hp <= 0 {
+            continue;
+        }
+        if setter_weather.is_none() {
+            if let Some(w) = weather_a_setter_would_bring(&p.ability) {
+                if w != weather {
+                    setter_weather = Some(w);
+                }
+            }
+        }
+        if setter_terrain.is_none() {
+            if let Some(t) = terrain_a_setter_would_bring(&p.ability) {
+                if t != terrain {
+                    setter_terrain = Some(t);
+                }
+            }
+        }
+    }
+    if let Some(w) = setter_weather {
+        let mut would_be = 0.0;
+        let mut iter = side.pokemon.into_iter();
+        while let Some(p) = iter.next() {
+            if p.hp > 0 {
+                would_be += evaluate_weather_for_active(p, w, trick_room);
+            }
+        }
+        if would_be > 0.0 {
+            score += SETTER_RESOURCE_SCALE * would_be;
+        }
+    }
+    if let Some(t) = setter_terrain {
+        let mut would_be = 0.0;
+        let mut iter = side.pokemon.into_iter();
+        while let Some(p) = iter.next() {
+            if p.hp > 0 {
+                would_be += evaluate_terrain_for_active(p, t, trick_room);
+            }
+        }
+        if would_be > 0.0 {
+            score += SETTER_RESOURCE_SCALE * would_be;
+        }
+    }
+    score
+}
+
 fn evaluate_terrain_for_active(pokemon: &Pokemon, terrain: Terrain, trick_room: bool) -> f32 {
     if !pokemon.is_grounded() { return 0.0; }
     let speed_bonus = if trick_room { 0.0 } else { WEATHER_SPEED_ABILITY };
@@ -1206,6 +1325,13 @@ pub fn evaluate(state: &State) -> f32 {
         }
     }
 
+    // Fork-added (2026-07-31): team-scope field value, gated separately from
+    // the active terms above so the paired A/B isolates exactly the new part.
+    if !off.weatherteam {
+        score += evaluate_side_field_team(&state.side_one, weather, terrain, trick_room);
+        score -= evaluate_side_field_team(&state.side_two, weather, terrain, trick_room);
+    }
+
     // Hopeless matchup: an active that can't damage the opponent at all AND has no status
     // moves is dead weight. Defensive walls with Roost/setup/hazards/phaze aren't hopeless —
     // they still have work to do even when their attacks register 0x.
@@ -1416,6 +1542,57 @@ mod tests {
             (moldbroken - credited).abs() < 0.5,
             "Mold Breaker should bypass the Unaware negation: {} vs {}",
             moldbroken, credited
+        );
+    }
+
+    /// Team-scope field value (weatherteam): a benched Swift Swim mon makes
+    /// rain worth points the actives-only terms never counted; an alive
+    /// Drizzle setter banks a FRACTION of that while rain is down (and a
+    /// fainted one banks nothing). The bank-vs-full gap is exactly the
+    /// leaf-level incentive to switch the setter in. Tested on the fn
+    /// directly so the CB_EVAL_ON gate (OnceLock, process-global) is not a
+    /// test-order hazard.
+    #[test]
+    fn bench_exploiters_and_alive_setter_carry_field_value() {
+        use super::evaluate_side_field_team;
+        use super::{Terrain, Weather};
+        use crate::state::{PokemonIndex, State};
+        let mut state = State::default();
+        let bench = &mut state.side_one.pokemon[PokemonIndex::P1];
+        bench.ability = Abilities::SWIFTSWIM;
+        bench.types.0 = super::PokemonType::WATER;
+
+        let rain_up = evaluate_side_field_team(
+            &state.side_one, Weather::RAIN, Terrain::NONE, false);
+        let down_no_setter = evaluate_side_field_team(
+            &state.side_one, Weather::NONE, Terrain::NONE, false);
+        assert!(
+            rain_up > down_no_setter + 5.0,
+            "a benched Swift Swim Water mon must make rain-up worth real \
+             points: {} !> {}", rain_up, down_no_setter
+        );
+
+        state.side_one.pokemon[PokemonIndex::P2].ability = Abilities::DRIZZLE;
+        let down_setter_alive = evaluate_side_field_team(
+            &state.side_one, Weather::NONE, Terrain::NONE, false);
+        assert!(
+            down_setter_alive > down_no_setter + 1.0,
+            "an alive Drizzle setter must bank resource value while rain is \
+             down: {} !> {}", down_setter_alive, down_no_setter
+        );
+        assert!(
+            down_setter_alive < rain_up,
+            "the banked fraction must stay below the field's full rate: \
+             {} !< {}", down_setter_alive, rain_up
+        );
+
+        state.side_one.pokemon[PokemonIndex::P2].hp = 0;
+        let down_setter_dead = evaluate_side_field_team(
+            &state.side_one, Weather::NONE, Terrain::NONE, false);
+        assert!(
+            (down_setter_dead - down_no_setter).abs() < 1e-6,
+            "a fainted setter banks nothing: {} vs {}",
+            down_setter_dead, down_no_setter
         );
     }
 
