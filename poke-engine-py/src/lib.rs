@@ -12,7 +12,7 @@ use poke_engine::engine::items::Items;
 use poke_engine::engine::state::{MoveChoice, PokemonVolatileStatus, Terrain, Weather};
 use poke_engine::instruction::{Instruction, StateInstructions};
 use poke_engine::game::{play_game, play_games, play_games_recorded};
-use poke_engine::engine::evaluate::evaluate;
+use poke_engine::engine::evaluate::{evaluate, evaluate_terms, EVAL_TERM_LABELS};
 use poke_engine::mcts::{
     perform_mcts, perform_mcts_multi, perform_mcts_with_priors, MctsResult, MctsSideResult,
     PersistentMcts,
@@ -981,6 +981,17 @@ fn py_evaluate(py_state: PyState) -> PyResult<f32> {
     Ok(evaluate(&state))
 }
 
+#[pyfunction(name = "evaluate_terms")]
+fn py_evaluate_terms(py_state: PyState) -> PyResult<Vec<f32>> {
+    let state: State = py_state.into();
+    Ok(evaluate_terms(&state).to_vec())
+}
+
+#[pyfunction(name = "eval_term_labels")]
+fn py_eval_term_labels() -> PyResult<Vec<String>> {
+    Ok(EVAL_TERM_LABELS.iter().map(|s| s.to_string()).collect())
+}
+
 /// Per-battle archetype mode switch: the driver sets this at team preview
 /// (wall-war detection) and the eval reads it on every leaf. Process-wide;
 /// bench workers play one battle at a time so per-battle semantics hold.
@@ -1472,6 +1483,8 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_instructions, m)?)?;
     m.add_function(wrap_pyfunction!(id, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate_terms, m)?)?;
+    m.add_function(wrap_pyfunction!(py_eval_term_labels, m)?)?;
     m.add_function(wrap_pyfunction!(set_stall_mode, m)?)?;
     m.add_function(wrap_pyfunction!(mcts, m)?)?;
     m.add_function(wrap_pyfunction!(mcts_with_priors, m)?)?;

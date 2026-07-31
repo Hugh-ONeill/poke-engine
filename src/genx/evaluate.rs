@@ -1163,8 +1163,47 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
     score
 }
 
-pub fn evaluate(state: &State) -> f32 {
-    let mut score = 0.0;
+// ---- term decomposition (2026-07-31, the residual-recalibration rung) ----
+// evaluate() is now the sum of a fixed vector of term-group subtotals, one
+// per contiguous block of the old function. The groups exist so the hand
+// constants' RELATIVE weights can be fitted against game outcomes offline
+// (eval_dataset.py -> logistic fit) instead of one paired A/B per constant.
+// Group boundaries follow the block/helper structure; note two folds:
+// choice_on_wall rides inside evaluate_pokemon (group 0), and USED_TERA
+// rides with the tera group. Cross-group float ordering changes sums by
+// ~1e-4 — behavioral noise far below any decision threshold.
+pub const EVAL_TERM_LABELS: [&str; 13] = [
+    "pokemon",        // evaluate_pokemon both sides: hp/status/pp/synergy/items/alive
+    "hazards",        // evaluate_hazards both sides
+    "volatiles",      // evaluate_active_volatiles both actives
+    "locks",          // choice_locked_into_status (choice_on_wall is in group 0)
+    "tera",           // evaluate_tera_active + USED_TERA
+    "boosts",         // 5 stat-boost terms, threat/unaware/TR-scaled
+    "screens",        // reflect/screen/veil/safeguard/tailwind/healing-wish
+    "pending",        // evaluate_pending_effects (wish/future sight)
+    "weather_active", // evaluate_weather_for_active both actives
+    "terrain_active", // evaluate_terrain_for_active both actives
+    "weather_team",   // evaluate_side_field_team (CB_EVAL_ON=weatherteam)
+    "hopeless",       // hopeless-matchup
+    "speed_tier",     // speed-tier bonus
+];
+
+const T_POKEMON: usize = 0;
+const T_HAZARDS: usize = 1;
+const T_VOLATILES: usize = 2;
+const T_LOCKS: usize = 3;
+const T_TERA: usize = 4;
+const T_BOOSTS: usize = 5;
+const T_SCREENS: usize = 6;
+const T_PENDING: usize = 7;
+const T_WEATHER_ACTIVE: usize = 8;
+const T_TERRAIN_ACTIVE: usize = 9;
+const T_WEATHER_TEAM: usize = 10;
+const T_HOPELESS: usize = 11;
+const T_SPEED_TIER: usize = 12;
+
+pub fn evaluate_terms(state: &State) -> [f32; 13] {
+    let mut t = [0.0f32; 13];
 
     let off = eval_off();
     let s1_active = &state.side_one.pokemon[state.side_one.active_index];
@@ -1213,26 +1252,26 @@ pub fn evaluate(state: &State) -> f32 {
     let mut s1_used_tera = false;
     while let Some(pkmn) = iter.next() {
         if pkmn.hp > 0 {
-            score += evaluate_pokemon(pkmn);
-            score += evaluate_hazards(pkmn, &state.side_one);
+            t[T_POKEMON] += evaluate_pokemon(pkmn);
+            t[T_HAZARDS] += evaluate_hazards(pkmn, &state.side_one);
             if iter.pokemon_index == state.side_one.active_index {
-                score += evaluate_active_volatiles(pkmn, &state.side_one);
+                t[T_VOLATILES] += evaluate_active_volatiles(pkmn, &state.side_one);
                 if !off.locks && choice_locked_into_status(pkmn) {
-                    score += CHOICE_LOCKED_STATUS;
+                    t[T_LOCKS] += CHOICE_LOCKED_STATUS;
                 }
                 if !off.tera {
-                    score += evaluate_tera_active(pkmn);
+                    t[T_TERA] += evaluate_tera_active(pkmn);
                 }
 
-                score += get_boost_multiplier(state.side_one.attack_boost)
+                t[T_BOOSTS] += get_boost_multiplier(state.side_one.attack_boost)
                     * POKEMON_ATTACK_BOOST * s1_phys * s1_dmg_boost;
-                score += get_boost_multiplier(state.side_one.defense_boost)
+                t[T_BOOSTS] += get_boost_multiplier(state.side_one.defense_boost)
                     * POKEMON_DEFENSE_BOOST * s1_dmg_boost;
-                score += get_boost_multiplier(state.side_one.special_attack_boost)
+                t[T_BOOSTS] += get_boost_multiplier(state.side_one.special_attack_boost)
                     * POKEMON_SPECIAL_ATTACK_BOOST * s1_spec * s1_dmg_boost;
-                score += get_boost_multiplier(state.side_one.special_defense_boost)
+                t[T_BOOSTS] += get_boost_multiplier(state.side_one.special_defense_boost)
                     * POKEMON_SPECIAL_DEFENSE_BOOST * s1_dmg_boost;
-                score += get_boost_multiplier(state.side_one.speed_boost)
+                t[T_BOOSTS] += get_boost_multiplier(state.side_one.speed_boost)
                     * POKEMON_SPEED_BOOST * speed_boost_sign;
             }
         }
@@ -1241,33 +1280,33 @@ pub fn evaluate(state: &State) -> f32 {
         }
     }
     if s1_used_tera {
-        score += USED_TERA;
+        t[T_TERA] += USED_TERA;
     }
     let mut iter = state.side_two.pokemon.into_iter();
     let mut s2_used_tera = false;
     while let Some(pkmn) = iter.next() {
         if pkmn.hp > 0 {
-            score -= evaluate_pokemon(pkmn);
-            score -= evaluate_hazards(pkmn, &state.side_two);
+            t[T_POKEMON] -= evaluate_pokemon(pkmn);
+            t[T_HAZARDS] -= evaluate_hazards(pkmn, &state.side_two);
 
             if iter.pokemon_index == state.side_two.active_index {
-                score -= evaluate_active_volatiles(pkmn, &state.side_two);
+                t[T_VOLATILES] -= evaluate_active_volatiles(pkmn, &state.side_two);
                 if !off.locks && choice_locked_into_status(pkmn) {
-                    score -= CHOICE_LOCKED_STATUS;
+                    t[T_LOCKS] -= CHOICE_LOCKED_STATUS;
                 }
                 if !off.tera {
-                    score -= evaluate_tera_active(pkmn);
+                    t[T_TERA] -= evaluate_tera_active(pkmn);
                 }
 
-                score -= get_boost_multiplier(state.side_two.attack_boost)
+                t[T_BOOSTS] -= get_boost_multiplier(state.side_two.attack_boost)
                     * POKEMON_ATTACK_BOOST * s2_phys * s2_dmg_boost;
-                score -= get_boost_multiplier(state.side_two.defense_boost)
+                t[T_BOOSTS] -= get_boost_multiplier(state.side_two.defense_boost)
                     * POKEMON_DEFENSE_BOOST * s2_dmg_boost;
-                score -= get_boost_multiplier(state.side_two.special_attack_boost)
+                t[T_BOOSTS] -= get_boost_multiplier(state.side_two.special_attack_boost)
                     * POKEMON_SPECIAL_ATTACK_BOOST * s2_spec * s2_dmg_boost;
-                score -= get_boost_multiplier(state.side_two.special_defense_boost)
+                t[T_BOOSTS] -= get_boost_multiplier(state.side_two.special_defense_boost)
                     * POKEMON_SPECIAL_DEFENSE_BOOST * s2_dmg_boost;
-                score -= get_boost_multiplier(state.side_two.speed_boost)
+                t[T_BOOSTS] -= get_boost_multiplier(state.side_two.speed_boost)
                     * POKEMON_SPEED_BOOST * speed_boost_sign;
             }
         }
@@ -1276,28 +1315,28 @@ pub fn evaluate(state: &State) -> f32 {
         }
     }
     if s2_used_tera {
-        score -= USED_TERA;
+        t[T_TERA] -= USED_TERA;
     }
 
-    score += state.side_one.side_conditions.reflect as f32 * REFLECT;
-    score += state.side_one.side_conditions.light_screen as f32 * LIGHT_SCREEN;
-    score += state.side_one.side_conditions.aurora_veil as f32 * AURORA_VEIL;
-    score += state.side_one.side_conditions.safeguard as f32 * SAFE_GUARD;
-    score += state.side_one.side_conditions.tailwind as f32 * TAILWIND;
-    score += state.side_one.side_conditions.healing_wish as f32 * HEALING_WISH;
+    t[T_SCREENS] += state.side_one.side_conditions.reflect as f32 * REFLECT;
+    t[T_SCREENS] += state.side_one.side_conditions.light_screen as f32 * LIGHT_SCREEN;
+    t[T_SCREENS] += state.side_one.side_conditions.aurora_veil as f32 * AURORA_VEIL;
+    t[T_SCREENS] += state.side_one.side_conditions.safeguard as f32 * SAFE_GUARD;
+    t[T_SCREENS] += state.side_one.side_conditions.tailwind as f32 * TAILWIND;
+    t[T_SCREENS] += state.side_one.side_conditions.healing_wish as f32 * HEALING_WISH;
 
-    score -= state.side_two.side_conditions.reflect as f32 * REFLECT;
-    score -= state.side_two.side_conditions.light_screen as f32 * LIGHT_SCREEN;
-    score -= state.side_two.side_conditions.aurora_veil as f32 * AURORA_VEIL;
-    score -= state.side_two.side_conditions.safeguard as f32 * SAFE_GUARD;
-    score -= state.side_two.side_conditions.tailwind as f32 * TAILWIND;
-    score -= state.side_two.side_conditions.healing_wish as f32 * HEALING_WISH;
+    t[T_SCREENS] -= state.side_two.side_conditions.reflect as f32 * REFLECT;
+    t[T_SCREENS] -= state.side_two.side_conditions.light_screen as f32 * LIGHT_SCREEN;
+    t[T_SCREENS] -= state.side_two.side_conditions.aurora_veil as f32 * AURORA_VEIL;
+    t[T_SCREENS] -= state.side_two.side_conditions.safeguard as f32 * SAFE_GUARD;
+    t[T_SCREENS] -= state.side_two.side_conditions.tailwind as f32 * TAILWIND;
+    t[T_SCREENS] -= state.side_two.side_conditions.healing_wish as f32 * HEALING_WISH;
 
     // everything below here is fork-added: upstream's evaluate() ends at the
     // side-condition block above
     if !off.pending {
-        score += evaluate_pending_effects(&state.side_one);
-        score -= evaluate_pending_effects(&state.side_two);
+        t[T_PENDING] += evaluate_pending_effects(&state.side_one);
+        t[T_PENDING] -= evaluate_pending_effects(&state.side_two);
     }
 
     let trick_room = state.trick_room.active;
@@ -1306,10 +1345,10 @@ pub fn evaluate(state: &State) -> f32 {
         let s1_active = state.side_one.get_active_immutable();
         let s2_active = state.side_two.get_active_immutable();
         if s1_active.hp > 0 {
-            score += evaluate_weather_for_active(s1_active, weather, trick_room);
+            t[T_WEATHER_ACTIVE] += evaluate_weather_for_active(s1_active, weather, trick_room);
         }
         if s2_active.hp > 0 {
-            score -= evaluate_weather_for_active(s2_active, weather, trick_room);
+            t[T_WEATHER_ACTIVE] -= evaluate_weather_for_active(s2_active, weather, trick_room);
         }
     }
 
@@ -1318,18 +1357,18 @@ pub fn evaluate(state: &State) -> f32 {
         let s1_active = state.side_one.get_active_immutable();
         let s2_active = state.side_two.get_active_immutable();
         if s1_active.hp > 0 {
-            score += evaluate_terrain_for_active(s1_active, terrain, trick_room);
+            t[T_TERRAIN_ACTIVE] += evaluate_terrain_for_active(s1_active, terrain, trick_room);
         }
         if s2_active.hp > 0 {
-            score -= evaluate_terrain_for_active(s2_active, terrain, trick_room);
+            t[T_TERRAIN_ACTIVE] -= evaluate_terrain_for_active(s2_active, terrain, trick_room);
         }
     }
 
     // Fork-added (2026-07-31): team-scope field value, gated separately from
     // the active terms above so the paired A/B isolates exactly the new part.
     if !off.weatherteam {
-        score += evaluate_side_field_team(&state.side_one, weather, terrain, trick_room);
-        score -= evaluate_side_field_team(&state.side_two, weather, terrain, trick_room);
+        t[T_WEATHER_TEAM] += evaluate_side_field_team(&state.side_one, weather, terrain, trick_room);
+        t[T_WEATHER_TEAM] -= evaluate_side_field_team(&state.side_two, weather, terrain, trick_room);
     }
 
     // Hopeless matchup: an active that can't damage the opponent at all AND has no status
@@ -1337,10 +1376,10 @@ pub fn evaluate(state: &State) -> f32 {
     // they still have work to do even when their attacks register 0x.
     if !off.hopeless {
         if s1_active.hp > 0 && s1_phys == 0.0 && s1_spec == 0.0 && !s1_has_status {
-            score += HOPELESS_MATCHUP;
+            t[T_HOPELESS] += HOPELESS_MATCHUP;
         }
         if s2_active.hp > 0 && s2_phys == 0.0 && s2_spec == 0.0 && !s2_has_status {
-            score -= HOPELESS_MATCHUP;
+            t[T_HOPELESS] -= HOPELESS_MATCHUP;
         }
     }
 
@@ -1365,13 +1404,17 @@ pub fn evaluate(state: &State) -> f32 {
         let s1_def_missing = 1.0 - (s1_active.hp as f32 / s1_active.maxhp as f32);
         let s2_def_missing = 1.0 - (s2_active.hp as f32 / s2_active.maxhp as f32);
         if s1_faster && s1_max > 0.0 {
-            score += SPEED_TIER_BONUS * s1_max * s2_def_missing;
+            t[T_SPEED_TIER] += SPEED_TIER_BONUS * s1_max * s2_def_missing;
         } else if s2_faster && s2_max > 0.0 {
-            score -= SPEED_TIER_BONUS * s2_max * s1_def_missing;
+            t[T_SPEED_TIER] -= SPEED_TIER_BONUS * s2_max * s1_def_missing;
         }
     }
 
-    score
+    t
+}
+
+pub fn evaluate(state: &State) -> f32 {
+    evaluate_terms(state).iter().sum()
 }
 
 #[cfg(test)]
@@ -1543,6 +1586,31 @@ mod tests {
             "Mold Breaker should bypass the Unaware negation: {} vs {}",
             moldbroken, credited
         );
+    }
+
+    /// The term vector is the eval's public decomposition contract: labels
+    /// match indices, evaluate() is its sum, and an effect lands ONLY in its
+    /// own bucket (the offline weight fit depends on that isolation).
+    #[test]
+    fn term_vector_buckets_are_isolated() {
+        use super::{evaluate, evaluate_terms, EVAL_TERM_LABELS};
+        use crate::state::State;
+        let mut state = State::default();
+        let base = evaluate_terms(&state);
+        assert_eq!(base.len(), EVAL_TERM_LABELS.len());
+        let total: f32 = base.iter().sum();
+        assert!((total - evaluate(&state)).abs() < 1e-4);
+        state.side_two.side_conditions.spikes = 2;
+        let spiked = evaluate_terms(&state);
+        for (i, (b, s)) in base.iter().zip(spiked.iter()).enumerate() {
+            if EVAL_TERM_LABELS[i] == "hazards" {
+                assert!(s > b, "their spikes must credit our hazards bucket");
+            } else {
+                assert!((s - b).abs() < 1e-6,
+                        "bucket {} moved on a hazards-only change",
+                        EVAL_TERM_LABELS[i]);
+            }
+        }
     }
 
     /// Team-scope field value (weatherteam): a benched Swift Swim mon makes
