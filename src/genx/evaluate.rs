@@ -327,6 +327,25 @@ const TERRAIN_TYPE_BOOSTED: f32 = 5.0;
 const BENCH_FIELD_SCALE: f32 = 0.35;
 const SETTER_RESOURCE_SCALE: f32 = 0.20;
 
+// CB_WEATHERTEAM_SCALE multiplies the whole weatherteam group. Added after
+// the first A/B's behavior read (2026-07-31): at 1.0 the term shifts evals
+// by ~7-25 points against setter-switch compliance margins of 20-45 VISIT-
+// SHARE points, and arm B's decline rate did not move (63% vs 64% over
+// ~1500 fires/arm). The scale exists so an OFFLINE position sweep can find
+// the smallest value that actually flips the roles-demanded switches, and
+// the paired A/B is then spent once, at that value — instead of one A/B per
+// guessed constant.
+fn weatherteam_scale() -> f32 {
+    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("CB_WEATHERTEAM_SCALE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f32| v.is_finite() && *v > 0.0)
+            .unwrap_or(1.0)
+    })
+}
+
 // Pending side-level effects (stored on the side that benefits).
 const WISH_PENDING: f32 = 15.0;
 const FUTURE_SIGHT_PENDING: f32 = 18.0;
@@ -972,7 +991,7 @@ fn evaluate_side_field_team(
             score += SETTER_RESOURCE_SCALE * would_be;
         }
     }
-    score
+    score * weatherteam_scale()
 }
 
 fn evaluate_terrain_for_active(pokemon: &Pokemon, terrain: Terrain, trick_room: bool) -> f32 {
